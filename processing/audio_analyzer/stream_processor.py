@@ -265,6 +265,19 @@ class MultiStreamAnalyzer:
         
         log.info("MultiStreamAnalyzer initialized")
 
+
+    def _on_detection(self, detection: Detection) -> None:
+        """Internal callback: collect detection from any stream."""
+        try:
+            self.detection_queue.put_nowait(detection)
+        except queue.Full:
+            # Drop oldest if queue full
+            try:
+                self.detection_queue.get_nowait()
+            except queue.Empty:
+                pass
+            self.detection_queue.put_nowait(detection)
+
     def add_stream(
         self,
         source: str,
@@ -357,31 +370,11 @@ class MultiStreamAnalyzer:
         
         Args:
             timeout: Timeout between detections (None = wait forever)
+                     If timeout expires with no detection, keeps waiting.
         """
         while True:
             detection = self.read_detection(timeout=timeout)
-            if detection is None:
-                return
-            yield detection
+            if detection is not None:
+                yield detection
+            # If None (timeout), just loop again and keep waiting
 
-    def _on_detection(self, detection: Detection) -> None:
-        """Internal callback: emit detection to unified queue."""
-        try:
-            self.detection_queue.put_nowait(detection)
-        except queue.Full:
-            # Drop oldest to make room (live audio ≫ old history)
-            try:
-                self.detection_queue.get_nowait()
-            except queue.Empty:
-                pass
-            self.detection_queue.put_nowait(detection)
-            log.warning("Detection queue full, dropped oldest")
-
-    def close(self) -> None:
-        """Close all streams and cleanup."""
-        with self._lock:
-            for source, processor in self.processors.items():
-                processor.close()
-            self.processors.clear()
-            self._source_threads.clear()
-        log.info("MultiStreamAnalyzer closed")
