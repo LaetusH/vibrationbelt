@@ -1,4 +1,4 @@
-"""Alarm signal detection with FFT-based frequency analysis."""
+"""Alarm detection: Robust pattern-based approach for quiet & loud signals."""
 
 import numpy as np
 from scipy import signal
@@ -17,41 +17,42 @@ class AlarmType(Enum):
 
 
 class AlarmDetector:
-    """Detect and classify alarm signals in audio."""
+    """
+    Pattern-based alarm detection.
+    
+    Key principle: Detect alarms by PATTERN (frequency + periodicity),
+    NOT just loudness. This works even for quiet sirens that follow
+    a clear pulsing pattern.
+    """
 
-    # Alarm signatures
     ALARM_SIGNATURES = {
         AlarmType.SIREN_FIRE: {
             "freq_ranges": [(800, 1200)],
-            "harmonics": [(1600, 2400)],
-            "min_duration_ms": 500,
-            "periodicity_hz": (0.5, 2.0),
-            "min_amplitude": 0.05,
-            "description": "Fire siren (800-1200 Hz pulsing)",
+            "min_duration_ms": 300,  # Sirens are usually >300ms
+            "periodicity_hz": (0.3, 3.0),  # Pulsing 0.3-3 Hz
+            "min_pattern_strength": 0.4,  # Pattern quality 0-1
+            "description": "Fire siren (800-1200 Hz + pulsing pattern)",
         },
         AlarmType.SMOKE_DETECTOR: {
             "freq_ranges": [(2500, 3500)],
-            "harmonics": [(5000, 7000)],
-            "min_duration_ms": 2000,
-            "periodicity_hz": (2.0, 4.0),
-            "min_amplitude": 0.04,
-            "description": "Smoke detector (2.5-3.5 kHz chirps)",
+            "min_duration_ms": 1500,
+            "periodicity_hz": (1.5, 6.0),  # Fast chirps
+            "min_pattern_strength": 0.4,
+            "description": "Smoke detector (2.5-3.5 kHz + chirp pattern)",
         },
         AlarmType.ALARM_BEEP: {
             "freq_ranges": [(800, 1200), (1000, 2000)],
-            "harmonics": [],
-            "min_duration_ms": 200,
-            "periodicity_hz": (1.0, 5.0),
-            "min_amplitude": 0.06,
-            "description": "Alarm beep (800-2000 Hz)",
+            "min_duration_ms": 150,
+            "periodicity_hz": (1.0, 8.0),  # Regular beeping
+            "min_pattern_strength": 0.35,
+            "description": "Alarm beep (periodic beep pattern)",
         },
         AlarmType.WARNING_TONE: {
-            "freq_ranges": [(500, 1500), (1000, 2500)],
-            "harmonics": [],
-            "min_duration_ms": 300,
-            "periodicity_hz": (0.5, 3.0),
-            "min_amplitude": 0.05,
-            "description": "Warning tone (500-2500 Hz)",
+            "freq_ranges": [(500, 1500)],
+            "min_duration_ms": 250,
+            "periodicity_hz": (0.3, 4.0),
+            "min_pattern_strength": 0.35,
+            "description": "Warning tone (pulsing/sweep pattern)",
         },
     }
 
@@ -63,220 +64,212 @@ class AlarmDetector:
         self,
         audio: np.ndarray,
         sensitivity: float = 0.5,
-        min_confidence: float = 0.6,
+        min_confidence: float = 0.5,
     ) -> List[Dict]:
-        """Detect alarm signals in audio."""
+        """Detect alarms by pattern-matching."""
         detections = []
 
-        # **GATE 1: Overall signal amplitude**
+        # Check if audio is not completely dead
         overall_rms = np.sqrt(np.mean(audio ** 2))
-        overall_peak = np.max(np.abs(audio))
-        
-        if overall_rms < 0.01 and overall_peak < 0.05:
-            return []  # Signal too quiet
+        if overall_rms < 0.0005:  # Essentially silent
+            return []
 
-        # Compute FFT for frequency analysis
-        fft_freqs, fft_mags = self._compute_fft(audio)
-
-        # Detect each alarm type
+        # Try to detect each alarm type
         for alarm_type, sig_params in self.ALARM_SIGNATURES.items():
-            matches = self._detect_alarm_type(
-                audio, fft_freqs, fft_mags, alarm_type, sig_params, sensitivity
-            )
-            detections.extend(matches)
+            match = self._detect_alarm_type(audio, alarm_type, sig_params)
+            if match and match["confidence"] >= min_confidence:
+                detections.append(match)
 
-        # Filter by confidence
-        detections = [d for d in detections if d["confidence"] >= min_confidence]
-
-        # Sort by start time
-        detections = sorted(detections, key=lambda x: x["start_time"])
-
-        # Merge overlapping detections
-        detections = self._merge_overlapping(detections)
+        # Sort by confidence
+        detections = sorted(detections, key=lambda x: x["confidence"], reverse=True)
 
         return detections
 
     def _detect_alarm_type(
         self,
         audio: np.ndarray,
-        fft_freqs: np.ndarray,
-        fft_mags: np.ndarray,
         alarm_type: AlarmType,
         sig_params: dict,
-        sensitivity: float,
-    ) -> List[Dict]:
-        """Detect specific alarm type using FFT peaks."""
-        matches = []
-
-        # Check if FFT has strong peaks in target frequency ranges
-        freq_score = self._score_fft_frequency(fft_freqs, fft_mags, sig_params["freq_ranges"])
+    ) -> Optional[Dict]:
+        """Detect if audio contains a specific alarm pattern."""
         
-        # **GATE 1: Frequency must be present in FFT**
-        if freq_score < 0.3:  # At least 30% of max peak in target range
-            return []
+        # Step 1: Check if target frequencies are present
+        freq_match = self._check_frequency_content(audio, sig_params["freq_ranges"])
+        if freq_match is None:
+            return None  # No frequency match
 
-        # **GATE 2: Signal amplitude**
-        overall_rms = np.sqrt(np.mean(audio ** 2))
-        if overall_rms < sig_params["min_amplitude"]:
-            return []
+        # Step 2: Check if there's a periodic pattern
+        periodicity = self._check_periodicity(audio, sig_params["periodicity_hz"])
+        if periodicity is None:
+            return None  # No periodicity pattern
 
-        # **GATE 3: Periodicity check**
-        periodicity_score = self._score_periodicity(audio, sig_params["periodicity_hz"])
-        if periodicity_score < 0.1:  # Very relaxed
-            return []
+        # Step 3: Check duration (not too short)
+        duration_ms = len(audio) / self.sr * 1000
+        if duration_ms < sig_params["min_duration_ms"]:
+            return None
 
-        # All gates pass: Create detection
-        duration = len(audio) / self.sr
-        confidence = self._compute_confidence(freq_score, periodicity_score, overall_rms, sig_params)
+        # Step 4: Pattern strength must meet threshold
+        pattern_strength = freq_match * periodicity
+        if pattern_strength < sig_params["min_pattern_strength"]:
+            return None
 
-        if confidence >= 0.5:  # Minimum confidence
-            matches.append(
-                {
-                    "alarm_type": alarm_type,
-                    "start_time": 0.0,
-                    "end_time": duration,
-                    "confidence": confidence,
-                    "frequencies": sig_params["freq_ranges"],
-                    "features": {
-                        "duration_ms": duration * 1000,
-                        "freq_score": float(freq_score),
-                        "periodicity_score": float(periodicity_score),
-                        "rms": float(overall_rms),
-                    },
-                }
-            )
+        # All checks pass: Create detection
+        confidence = self._compute_confidence(freq_match, periodicity, audio)
 
-        return matches
+        return {
+            "alarm_type": alarm_type,
+            "start_time": 0.0,
+            "end_time": duration_ms / 1000,
+            "confidence": confidence,
+            "frequencies": sig_params["freq_ranges"],
+            "features": {
+                "duration_ms": duration_ms,
+                "freq_match": float(freq_match),
+                "periodicity": float(periodicity),
+                "pattern_strength": float(pattern_strength),
+                "rms": float(np.sqrt(np.mean(audio ** 2))),
+            },
+        }
 
-    def _score_fft_frequency(
+    def _check_frequency_content(
         self,
-        fft_freqs: np.ndarray,
-        fft_mags: np.ndarray,
+        audio: np.ndarray,
         freq_ranges: List[Tuple[float, float]],
-    ) -> float:
-        """Score FFT match to frequency ranges (0-1)."""
-        if fft_mags.size == 0:
-            return 0.0
+    ) -> Optional[float]:
+        """
+        Check if audio has energy in target frequency ranges.
+        
+        Returns: 0-1 score (how strong the frequency match), or None if no match.
+        """
+        # Compute FFT
+        freqs, mags = self._compute_fft(audio)
 
-        overall_max = np.max(fft_mags)
-        if overall_max < 1e-10:
-            return 0.0
-
+        # Look for peaks in target ranges
         total_energy = 0.0
+        max_energy = np.max(mags) if len(mags) > 0 else 1.0
+
         for f_min, f_max in freq_ranges:
-            mask = (fft_freqs >= f_min) & (fft_freqs <= f_max)
+            mask = (freqs >= f_min) & (freqs <= f_max)
             if np.any(mask):
-                band_max = np.max(fft_mags[mask])
+                band_max = np.max(mags[mask])
                 total_energy += band_max
 
-        # Score: how strong the target bands are relative to overall max
-        score = min(total_energy / overall_max, 1.0)
-        return float(score)
+        if max_energy < 1e-10:
+            return None
 
-    def _score_periodicity(
+        score = min(total_energy / max_energy, 1.0)
+
+        # Accept if at least some energy in target range (very relaxed)
+        if score > 0.15:  # Even 15% of max is OK
+            return float(score)
+
+        return None
+
+    def _check_periodicity(
         self,
         audio: np.ndarray,
         periodicity_range: Tuple[float, float],
-    ) -> float:
-        """Score signal periodicity (0-1)."""
-        if len(audio) < self.sr // 10:
-            return 0.0
-
-        # Compute autocorrelation
-        acf = self._autocorrelation(audio, max_lag=self.sr)
-        if len(acf) == 0:
-            return 0.0
-
-        # Find peaks in ACF
-        peaks, properties = signal.find_peaks(acf, height=0.3, distance=self.sr // 100)
+    ) -> Optional[float]:
+        """
+        Check if audio has periodic pattern (pulsing/chirping).
         
+        Returns: 0-1 score, or None if no periodicity detected.
+        """
+        # Compute autocorrelation to detect periodicity
+        acf = self._autocorrelation(audio)
+
+        if len(acf) == 0:
+            return None
+
+        # Find peaks in autocorrelation
+        # These peaks indicate periodic components
+        peaks, props = signal.find_peaks(acf, height=0.25)  # Relaxed threshold
+
         if len(peaks) == 0:
-            return 0.0
+            return None
 
-        # Check if peaks are in valid periodicity range
+        # Convert peak indices to periods (in Hz)
         peak_periods = self.sr / peaks
-        peak_heights = properties.get("peak_heights", np.ones(len(peaks)))
+        peak_heights = props.get("peak_heights", np.ones(len(peaks)))
 
+        # Check if ANY peak is in the valid periodicity range
         valid_mask = (peak_periods >= periodicity_range[0]) & (peak_periods <= periodicity_range[1])
+
+        if not np.any(valid_mask):
+            return None
+
+        # Use the strongest valid peak as score
         valid_heights = peak_heights[valid_mask]
-
-        if len(valid_heights) == 0:
-            return 0.0
-
-        # Score based on strongest valid peak
         strongest = np.max(valid_heights)
-        score = np.clip((strongest - 0.3) / 0.7, 0, 1)
-        return float(score)
+
+        # Score: 0.25-1.0 → 0-1
+        score = np.clip((strongest - 0.25) / 0.75, 0, 1)
+
+        return float(score) if score > 0.15 else None
 
     def _compute_confidence(
         self,
-        freq_score: float,
-        periodicity_score: float,
-        rms: float,
-        sig_params: dict,
+        freq_match: float,
+        periodicity: float,
+        audio: np.ndarray,
     ) -> float:
-        """Compute overall confidence (0-1)."""
-        confidence = 0.0
+        """Compute final confidence score (0-1)."""
+        # Frequency matching is critical: 40%
+        freq_score = freq_match * 0.4
 
-        # Frequency is most important
-        confidence += 0.5 * freq_score
+        # Periodicity pattern is critical: 40%
+        periodicity_score = periodicity * 0.4
 
-        # Periodicity is important for alarms
-        confidence += 0.3 * periodicity_score
+        # Amplitude is bonus (but not required): 20%
+        # Louder = more confidence, but quiet sirens with good pattern still count
+        rms = np.sqrt(np.mean(audio ** 2))
+        amp_score = min(rms / 0.05, 1.0) * 0.2  # 0.05 is reference (loud-ish)
 
-        # Amplitude matters
-        amplitude_score = min(rms / 0.3, 1.0)  # 0.3 is "loud"
-        confidence += 0.2 * amplitude_score
+        confidence = freq_score + periodicity_score + amp_score
 
         return min(confidence, 1.0)
 
     def _compute_fft(self, audio: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Compute FFT."""
+        """Compute FFT with windowing."""
+        # Use power-of-2 for efficiency
         n_fft = 2 ** int(np.ceil(np.log2(len(audio))))
+
+        # Apply Hann window to reduce spectral leakage
         window = signal.get_window("hann", len(audio))
         windowed = audio * window
 
+        # Compute FFT
         fft_result = np.fft.rfft(windowed, n=n_fft)
         magnitudes = np.abs(fft_result)
+
+        # Frequency bins
         frequencies = np.fft.rfftfreq(n_fft, 1 / self.sr)
 
         return frequencies, magnitudes
 
-    @staticmethod
-    def _autocorrelation(signal_data: np.ndarray, max_lag: Optional[int] = None) -> np.ndarray:
-        """Compute autocorrelation."""
+    def _autocorrelation(self, audio: np.ndarray, max_lag: Optional[int] = None) -> np.ndarray:
+        """Compute autocorrelation (measures periodicity)."""
         if max_lag is None:
-            max_lag = len(signal_data) // 2
+            max_lag = min(len(audio) // 2, self.sr * 2)  # Up to 2 sec lag
 
-        signal_data = signal_data - np.mean(signal_data)
-        acf = np.correlate(signal_data, signal_data, mode="full")
-        acf = acf[len(acf) // 2 :]
+        # Remove DC component
+        audio = audio - np.mean(audio)
+
+        if len(audio) < max_lag:
+            return np.array([])
+
+        # Compute autocorrelation using correlation
+        acf = np.correlate(audio, audio, mode="full")
+        acf = acf[len(acf) // 2 :]  # Keep only positive lags
+
+        # Normalize
         acf = acf / (acf[0] + 1e-10)
+
         return acf[:max_lag]
-
-    @staticmethod
-    def _merge_overlapping(detections: List[Dict]) -> List[Dict]:
-        """Merge overlapping detections."""
-        if not detections:
-            return []
-
-        merged = []
-        current = detections[0].copy()
-
-        for next_det in detections[1:]:
-            gap = next_det["start_time"] - current["end_time"]
-            if gap < 0.5:
-                current["end_time"] = max(current["end_time"], next_det["end_time"])
-                current["confidence"] = (current["confidence"] + next_det["confidence"]) / 2
-            else:
-                merged.append(current)
-                current = next_det.copy()
-
-        merged.append(current)
-        return merged
 
     def get_alarm_signatures(self) -> Dict:
         """Get all alarm signatures."""
         return {
-            alarm_type.value: params for alarm_type, params in self.ALARM_SIGNATURES.items()
+            alarm_type.value: {k: v for k, v in params.items() if k != "description"}
+            for alarm_type, params in self.ALARM_SIGNATURES.items()
         }
