@@ -122,12 +122,18 @@ class LoudnessDetector:
         
         Simplified using 2nd-order IIR filters.
         """
-        # High-frequency boost around 2-4 kHz
-        sos1 = signal.butter(2, [2000, 4000], btype="bandpass", fs=sr, output="sos")
-        boost = signal.sosfilt(sos1, audio)
-
-        # Apply boost (tuned factor)
-        audio_weighted = audio + 0.3 * boost
+        # High-frequency boost around 2-4 kHz (adapt to Nyquist)
+        nyquist = sr / 2
+        f_min = min(2000, nyquist * 0.4)
+        f_max = min(4000, nyquist * 0.9)
+        
+        if f_max > f_min:
+            sos1 = signal.butter(2, [f_min, f_max], btype="bandpass", fs=sr, output="sos")
+            boost = signal.sosfilt(sos1, audio)
+            # Apply boost (tuned factor)
+            audio_weighted = audio + 0.3 * boost
+        else:
+            audio_weighted = audio
 
         return audio_weighted
 
