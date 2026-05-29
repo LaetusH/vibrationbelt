@@ -33,21 +33,26 @@ static_assert(PACKET_BYTES <= 1472,
               "reduce cfg::DMA_FRAME_NUM to avoid IP fragmentation.");
 
 /// In-place DC removal followed by saturating int16 gain.
-/// One-pole IIR high-pass at ≈12 Hz to strip the PDM mic's DC bias before
-/// gain; otherwise even small gain pegs every sample at −32768.
-/// Filter state persists between calls — do NOT reset per-buffer.
-inline void dcBlockAndGain(int16_t* samples, size_t n) {
+///
+/// One-pole IIR high-pass at ≈12 Hz removes the PDM mic's DC bias before
+/// gain; without it, even small gain pegs every sample at −32768.
+///
+/// Filter state is per-channel (CHANNELS independent histories), persists
+/// between calls — do NOT reset per buffer. `samples` is interleaved
+/// L,R,L,R,… for stereo.
+inline void dcBlockAndGain(int16_t* samples, size_t n_samples) {
     constexpr float ALPHA = 0.995f;
     constexpr float GAIN  = cfg::AUDIO_GAIN;
 
-    static float prev_x = 0.0f;
-    static float prev_y = 0.0f;
+    static float prev_x[cfg::CHANNELS] = {};
+    static float prev_y[cfg::CHANNELS] = {};
 
-    for (size_t i = 0; i < n; ++i) {
+    for (size_t i = 0; i < n_samples; ++i) {
+        const int ch = i % cfg::CHANNELS;
         const float x = static_cast<float>(samples[i]);
-        const float y = ALPHA * (prev_y + x - prev_x);
-        prev_x = x;
-        prev_y = y;
+        const float y = ALPHA * (prev_y[ch] + x - prev_x[ch]);
+        prev_x[ch] = x;
+        prev_y[ch] = y;
 
         float v = y * GAIN;
         if (v >  32767.0f) v =  32767.0f;

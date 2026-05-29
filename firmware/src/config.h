@@ -69,13 +69,18 @@ inline constexpr int PDM_DATA_PIN = 25;
 inline constexpr uint32_t SAMPLE_RATE_HZ = 16000;
 
 // CHANNELS:
-//   1 = mono PDM RX. Works reliably on classic ESP32-WROOM-32.
-//   2 = stereo PDM RX. Empirically broken on classic ESP32 — the peripheral
-//       silently degrades to mono and the clock divider miscomputes.
-//       To get real stereo: (a) use both mics through the on-board ADAU7002
-//       and switch this driver to standard I²S RX, or (b) upgrade to
-//       ESP32-S3 which does support stereo PDM RX in hardware.
-inline constexpr int CHANNELS = 1;
+//   1 = mono PDM RX.
+//   2 = stereo PDM RX. Both mic pieces (top = R-channel, bottom = L-channel
+//       per the Shield2Go's factory 0Ω strap) wire in parallel onto the
+//       same CLK and DATA lines. The ESP32 deinterleaves them via the
+//       PDM CLK edges.
+//
+// Empirical note: classic ESP32 stereo PDM RX was unreliable under the
+// LEGACY driver. With the new ESP-IDF 5 i2s_pdm driver and BOTH mics
+// physically wired (not just one), it should work. If you see L == R or
+// wrong rate after a stereo build, the path forward is the ADAU7002 I²S
+// route or an ESP32-S3.
+inline constexpr int CHANNELS = 2;
 inline constexpr int BITS_PER_SAMPLE = 16;
 
 // Software gain applied to every sample on the ESP32 before sending.

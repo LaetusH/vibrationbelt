@@ -26,7 +26,7 @@ using System.Net;
 using System.Net.Sockets;
 
 const int SAMPLE_RATE       = 16000;
-const int CHANNELS          = 1;
+const int CHANNELS          = 2;     // must match firmware cfg::CHANNELS
 const int BYTES_PER_SAMPLE  = 2;
 const int BYTES_PER_FRAME   = CHANNELS * BYTES_PER_SAMPLE;
 const int KEEPALIVE_INTERVAL_MS = 1000;
