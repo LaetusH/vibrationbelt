@@ -104,7 +104,10 @@ class StreamProcessor:
         
         # Streaming state
         self.buffer = np.array([], dtype=np.float32)
+        self.detection_buffer = np.array([], dtype=np.float32)  # For alarm detection (needs ~1s)
         self.total_frames_processed = 0
+        self.baseline_start_time = None  # Will be set on first chunk
+        self.baseline_duration_sec = baseline_duration_sec  # Store for later
         self.is_calibrated = False
         self.calibration_start_time = None
         
@@ -135,6 +138,10 @@ class StreamProcessor:
             return
 
         with self._lock:
+            # Set baseline start time on first chunk
+            if self.baseline_start_time is None:
+                self.baseline_start_time = self.total_frames_processed / self.sr
+            
             # Convert to float32 if needed
             if chunk.dtype != np.float32:
                 chunk = chunk.astype(np.float32) / np.iinfo(chunk.dtype).max
@@ -152,39 +159,46 @@ class StreamProcessor:
         self.total_frames_processed += len(frame)
         elapsed_sec = self.total_frames_processed / self.sr
         
+        # Add frame to detection buffer
+        self.detection_buffer = np.concatenate([self.detection_buffer, frame])
+        
         # PHASE 1: Calibration (learn ambient baseline)
         if not self.is_calibrated:
-            if self.calibration_start_time is None:
-                self.calibration_start_time = elapsed_sec
-            
-            baseline_age = elapsed_sec - self.calibration_start_time
-            if baseline_age < 10.0:
+            baseline_age = elapsed_sec - self.baseline_start_time
+            if baseline_age < self.baseline_duration_sec:
                 # Still learning baseline
                 self.anomaly_detector.learn_baseline(frame)
-                if baseline_age > 1.0 and not self.is_calibrated:
-                    # Log calibration progress
-                    log.debug(f"Calibrating {self.source}: {baseline_age:.1f}s")
+                return  # Don't detect during calibration
             else:
                 # Calibration complete
                 self.is_calibrated = True
-                log.info(f"Calibration complete for {self.source}")
-                return
+                log.info(f"Calibration complete for {self.source} (learned {baseline_age:.1f}s)")
+                # Fall through to detection
         
-        # PHASE 2: Run both detectors in parallel
+        # PHASE 2: Check if we have enough data for detection
+        # Detectors work better with >1 second of audio
+        min_detection_samples = int(1.0 * self.sr)  # 1 second @ sr
+        if len(self.detection_buffer) < min_detection_samples:
+            return  # Not enough data yet, keep buffering
+        
+        # Use last 1-2 seconds for detection
+        detection_audio = self.detection_buffer[-min_detection_samples:]
+        
+        # PHASE 3: Run both detectors in parallel
         alarm_detections = self.alarm_detector.detect_alarms_streaming(
-            frame,
+            detection_audio,
             sensitivity=self.alarm_sensitivity,
-            min_confidence=0.4,  # Relaxed for streaming
+            min_confidence=0.3,  # Relaxed threshold
         )
         
         anomaly_detections = self.anomaly_detector.detect_anomalies(
-            frame,
+            detection_audio,
             min_snr_db=6.0,
-            min_confidence=0.4,
+            min_confidence=0.3,
             sensitivity=self.anomaly_sensitivity,
         )
         
-        # PHASE 3: Convert to unified output format
+        # PHASE 4: Convert to unified output format
         # Priority: ALARM > LOUD_SOUND
         
         # Check alarms first
