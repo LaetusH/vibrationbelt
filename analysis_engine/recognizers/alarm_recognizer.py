@@ -151,10 +151,13 @@ class AlarmRecognizer:
             }
 
     def _load_cnn_model(self, model_path: str):
-        """Load trained PyTorch model."""
+        """Load trained PyTorch model (state_dict format)."""
         try:
             import torch
-            self.model = torch.load(model_path, map_location='cpu')
+            from .alarm_cnn_model import AlarmCNN
+            
+            self.model = AlarmCNN()
+            self.model.load_state_dict(torch.load(model_path, map_location='cpu'))
             self.model.eval()
             print(f"✓ Loaded CNN model from {model_path}")
         except Exception as e:

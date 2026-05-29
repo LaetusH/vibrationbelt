@@ -284,8 +284,19 @@ def main():
     
     args = parser.parse_args()
     
-    # Initialize pipeline
-    pipeline = AudioAnalysisPipeline(use_template_only=True)
+    # Initialize pipeline with CNN model (if available)
+    model_path = Path("models/alarm_detector.pt")
+    use_cnn = model_path.exists()
+    
+    if use_cnn:
+        print(f"✓ Using CNN model: {model_path}")
+        pipeline = AudioAnalysisPipeline(
+            model_path=str(model_path),
+            use_template_only=False
+        )
+    else:
+        print("ℹ️  No CNN model found, using template matching (disabled)")
+        pipeline = AudioAnalysisPipeline(use_template_only=True)
     
     # Create analyzer
     analyzer = LiveAnalyzer(pipeline, interval_ms=args.interval)
