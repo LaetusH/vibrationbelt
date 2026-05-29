@@ -9,7 +9,19 @@ builder.Services.Configure<BeltOptions>(builder.Configuration.GetSection("Belt")
 builder.Services.AddSingleton<MicReceiver>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MicReceiver>());
 
+// Add CORS for Python analysis pipeline
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy =>
+    {
+        policy.AllowAnyOrigin()
+             .AllowAnyMethod()
+             .AllowAnyHeader();
+    });
+});
+
 // Add services to the container.
+builder.Services.AddControllers();
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
@@ -26,9 +38,12 @@ if (!app.Environment.IsDevelopment())
 app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
 app.UseHttpsRedirection();
 
+app.UseCors();
+
 app.UseAntiforgery();
 
 app.MapStaticAssets();
+app.MapControllers();
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 
