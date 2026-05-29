@@ -50,11 +50,13 @@ def monitor_audio(chunk_duration: float = 2.0, sr: int = 16000, verbose: bool = 
             if verbose:
                 print(f"peak={peak:.3f} rms={rms:.4f}", end=" | ")
             
+            ################################# HIER ANPASSEN #####################################################
+            #####################################################################################################
             # Detect alarms
             alarms = pipeline.alarm_detector.detect_alarms(
                 audio,
                 sensitivity=0.6,
-                min_confidence=0.6  # Higher threshold = fewer false positives
+                min_confidence=0.7  # Higher threshold = fewer false positives
             )
             
             if alarms:

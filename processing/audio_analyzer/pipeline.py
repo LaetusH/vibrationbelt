@@ -9,6 +9,7 @@ from .fft import FFTAnalyzer
 from .spectrogram import SpectrogramGenerator
 from .loudness import LoudnessDetector
 from .alarm_detector import AlarmDetector, AlarmType
+from .anomaly_detector import AnomalyDetector, AnomalyType
 
 
 class AudioAnalysisPipeline:
@@ -27,6 +28,7 @@ class AudioAnalysisPipeline:
         self.spectrogram_gen = SpectrogramGenerator()
         self.loudness_detector = LoudnessDetector()
         self.alarm_detector = AlarmDetector(target_sr)
+        self.anomaly_detector = AnomalyDetector(target_sr)
 
     def analyze_file(
         self,
@@ -272,4 +274,100 @@ class AudioAnalysisPipeline:
         else:
             lines.append("Alarms Detected: None")
 
+        return "\n".join(lines)
+
+    def detect_anomalies(
+        self,
+        audio: np.ndarray,
+        sr: int,
+        baseline_audio: Optional[np.ndarray] = None,
+        baseline_sr: Optional[int] = None,
+        min_snr_db: float = 6.0,
+        min_confidence: float = 0.5,
+        sensitivity: float = 0.5,
+    ) -> Dict:
+        """
+        Detect acoustic anomalies (screams, crashes, sharp noises).
+        
+        Args:
+            audio: Audio data to analyze.
+            sr: Sample rate.
+            baseline_audio: Audio to learn ambient baseline from. If None, uses first half of audio.
+            baseline_sr: Sample rate of baseline audio (if different).
+            min_snr_db: Minimum SNR threshold (dB).
+            min_confidence: Minimum confidence threshold (0-1).
+            sensitivity: Detection sensitivity multiplier (0.1-1.0).
+            
+        Returns:
+            Dictionary with anomaly detections.
+        """
+        # Resample if needed
+        if sr != self.target_sr:
+            from scipy import signal as scipy_signal
+            ratio = self.target_sr / sr
+            n_samples = int(len(audio) * ratio)
+            audio = scipy_signal.resample(audio, n_samples)
+            sr = self.target_sr
+        
+        # Learn baseline
+        if baseline_audio is not None:
+            if baseline_sr and baseline_sr != self.target_sr:
+                from scipy import signal as scipy_signal
+                ratio = self.target_sr / baseline_sr
+                n_samples = int(len(baseline_audio) * ratio)
+                baseline_audio = scipy_signal.resample(baseline_audio, n_samples)
+            self.anomaly_detector.learn_baseline(baseline_audio)
+        
+        # Detect anomalies
+        anomalies = self.anomaly_detector.detect_anomalies(
+            audio,
+            min_snr_db=min_snr_db,
+            min_confidence=min_confidence,
+            sensitivity=sensitivity,
+        )
+        
+        # Generate summary
+        summary = self._generate_anomaly_summary(audio, sr, anomalies)
+        
+        return {
+            "audio": audio,
+            "sr": sr,
+            "duration_sec": len(audio) / sr,
+            "anomalies": anomalies,
+            "summary": summary,
+            "baseline_rms": self.anomaly_detector.baseline_rms,
+        }
+
+    @staticmethod
+    def _generate_anomaly_summary(
+        audio: np.ndarray,
+        sr: int,
+        anomalies: List[Dict],
+    ) -> str:
+        """Generate anomaly detection summary."""
+        duration = len(audio) / sr
+        rms = np.sqrt(np.mean(audio ** 2))
+        peak = np.max(np.abs(audio))
+        
+        lines = [
+            "Anomaly Detection Summary",
+            "=========================",
+            f"Duration: {duration:.2f} sec",
+            f"Peak: {peak:.4f}",
+            f"RMS: {rms:.4f}",
+            "",
+        ]
+        
+        if anomalies:
+            lines.append(f"Anomalies Detected: {len(anomalies)}")
+            for i, anom in enumerate(anomalies, 1):
+                anom_type = anom["type"].value
+                confidence = anom["confidence"]
+                snr_db = anom["snr_db"]
+                lines.append(
+                    f"  {i}. {anom_type} ({confidence:.0%}) SNR:{snr_db:.1f}dB"
+                )
+        else:
+            lines.append("Anomalies Detected: None")
+        
         return "\n".join(lines)
