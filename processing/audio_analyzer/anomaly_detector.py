@@ -336,12 +336,18 @@ class AnomalyDetector:
         n_fft: int = 2048,
         hop_length: int = 512,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Compute spectrogram (freq x time)."""
+        """Compute spectrogram (freq x time). Handles short audio."""
+        # For short audio, use smaller FFT window
+        actual_n_fft = min(n_fft, max(len(audio), 512))
+        actual_hop = max(1, actual_n_fft // 2)
+        actual_overlap = max(0, actual_n_fft - actual_hop)
+        
         freqs, times, spectrogram = signal.spectrogram(
             audio,
             fs=self.sr,
-            nperseg=n_fft,
-            noverlap=n_fft - hop_length,
+            nperseg=actual_n_fft,
+            noverlap=actual_overlap,
         )
         
         return freqs, spectrogram
+

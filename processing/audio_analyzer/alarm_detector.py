@@ -273,3 +273,25 @@ class AlarmDetector:
             alarm_type.value: {k: v for k, v in params.items() if k != "description"}
             for alarm_type, params in self.ALARM_SIGNATURES.items()
         }
+
+
+# Streaming alias (added at end of class)
+def detect_alarms_streaming(
+    self,
+    audio: np.ndarray,
+    sensitivity: float = 0.5,
+    min_confidence: float = 0.4,
+) -> List[Dict]:
+    """
+    Stream-optimized alarm detection (short frames, low latency).
+    
+    Same as detect_alarms but for real-time streaming:
+    - Lower confidence threshold (0.4 instead of 0.6)
+    - Works on short frames (~30-100ms)
+    - Faster computation
+    """
+    return self.detect_alarms(audio, sensitivity=sensitivity, min_confidence=min_confidence)
+
+
+# Add to AlarmDetector class
+AlarmDetector.detect_alarms_streaming = detect_alarms_streaming

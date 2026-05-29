@@ -323,7 +323,7 @@ if __name__ == "__main__":
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     print("Press Ctrl-C to stop\n")
-    with MicStream(sys.argv[1]) as mic:
+    with MicStream("10.8.5.177") as mic:
         try:
             for chunk in mic:
                 # RMS → simple ASCII level meter
