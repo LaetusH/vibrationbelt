@@ -9,3 +9,5 @@ firmware/platform/**/__pycache__/
 */.vscode/c_cpp_properties.json
 firmware/.vscode/launch.json
 firmware/platform
+obj/
+__pycache__

@@ -66,7 +66,7 @@ inline constexpr int PDM_DATA_PIN = 25;
 // Per the IM69D130 datasheet the supported clock range is roughly
 // 1.0–3.5 MHz for normal operation. 16 kHz is also the rate the classic
 // ESP32 PDM peripheral handles most reliably.
-inline constexpr uint32_t SAMPLE_RATE_HZ = 16000;
+inline constexpr uint32_t SAMPLE_RATE_HZ = 8000;
 
 // CHANNELS:
 //   1 = mono PDM RX.

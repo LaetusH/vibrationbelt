@@ -70,6 +70,7 @@ inline void dcBlockAndGain(int16_t* samples, size_t n_samples) {
     uint32_t seq = 0;
     uint64_t last_report_us = esp_timer_get_time();
     uint32_t pkts_since_report = 0;
+    uint32_t fails_since_report = 0;
 
     Serial.printf("[audio] task on core %d  packet=%u B (hdr %u + audio %u)\n",
                   xPortGetCoreID(),
@@ -110,19 +111,38 @@ inline void dcBlockAndGain(int16_t* samples, size_t n_samples) {
         IPAddress dst(sub_ip);
         g_udp.beginPacket(dst, sub_port);
         g_udp.write(packet, total);
-        g_udp.endPacket();   // returns 1 on success; we don't retry on fail
-
-        pkts_since_report++;
+        // endPacket() returns 1 on success, 0 on failure. On a weak link
+        // it fails with ENOMEM (lwIP TX buffers exhausted). For live audio
+        // that's fine — we drop this packet and keep going; the receiver's
+        // sequence numbers show it as a drop. We count failures and report
+        // them in the throttled stat line below rather than logging each
+        // one (per-failure logging would flood the UART and stall us).
+        if (g_udp.endPacket() == 1) {
+            pkts_since_report++;
+        } else {
+            fails_since_report++;
+            // ENOMEM: lwIP TX buffers are exhausted (weak/congested link).
+            // Yield ~2 ms so the WiFi TX path can drain before the next
+            // attempt. Without this we tight-loop re-failing while the
+            // buffers stay full, which keeps the link wedged. We're
+            // dropping this packet regardless, so the delay is harmless.
+            vTaskDelay(pdMS_TO_TICKS(2));
+        }
 
         if (t_us - last_report_us > 1'000'000) {
             const float secs = (t_us - last_report_us) / 1e6f;
-            Serial.printf("[audio] seq=%u  %.1f pkts/s  RSSI=%d  sub=%s:%u\n",
-                          (unsigned)seq,
-                          pkts_since_report / secs,
-                          WiFi.RSSI(),
-                          dst.toString().c_str(),
-                          (unsigned)sub_port);
+            const int rssi = WiFi.RSSI();
+            Serial.printf(
+                "[audio] seq=%u  %.0f sent/s  %.0f failed/s  RSSI=%d%s  sub=%s:%u\n",
+                (unsigned)seq,
+                pkts_since_report / secs,
+                fails_since_report / secs,
+                rssi,
+                rssi < -75 ? " (WEAK! move closer to AP)" : "",
+                dst.toString().c_str(),
+                (unsigned)sub_port);
             pkts_since_report = 0;
+            fails_since_report = 0;
             last_report_us = t_us;
         }
     }

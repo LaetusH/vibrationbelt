@@ -1,0 +1,242 @@
+@page "/"
+@rendermode InteractiveServer
+@inject MicReceiver Mic
+@inject Microsoft.Extensions.Options.IOptions<BeltOptions> Opts
+@inject ILogger<Home> Log
+@implements IAsyncDisposable
+
+<PageTitle>Belt Mic Debug</PageTitle>
+
+<style>
+    .vb-wrap { font-family: ui-monospace, "SF Mono", Menlo, monospace; max-width: 1100px; }
+    .vb-panel { background:#151821; border:1px solid #262a36; border-radius:8px;
+                padding:14px 16px; margin-bottom:12px; color:#d9dde7; }
+    .vb-row { display:flex; gap:12px; flex-wrap:wrap; }
+    .vb-row > .vb-panel { flex:1; min-width:320px; }
+    .vb-muted { color:#7a8190; font-size:13px; }
+    .vb-muted strong { color:#d9dde7; }
+    h2.vb { font-size:12px; margin:0 0 8px; text-transform:uppercase; letter-spacing:.05em; }
+    svg.vb-wave { display:block; width:100%; height:120px; background:#0a0c11; border-radius:6px; }
+    .vb-arrow { position:relative; height:34px; border-radius:6px; margin:14px 0 8px;
+        background:linear-gradient(90deg, rgba(95,191,255,.20), transparent 45%, transparent 55%, rgba(255,180,95,.20)); }
+    .vb-arrow .tk { position:absolute; top:0; bottom:0; width:1px; background:#2c3140; }
+    .vb-arrow .mk { position:absolute; top:-4px; width:4px; height:42px; border-radius:2px;
+        background:#6ad06a; transform:translateX(-2px); transition:left .12s ease-out, background .25s; }
+    .vb-arrow.unsure .mk { background:#e26a6a; }
+    .vb-axis { display:flex; justify-content:space-between; font-size:11px; color:#7a8190; }
+</style>
+
+<div class="vb-wrap">
+    <h1 style="font-size:18px;">Belt Mic Debug</h1>
+
+    <div class="vb-panel">
+        <div class="vb-muted">
+            ESP32 <strong>@Mic.EspIp:@Mic.EspPort</strong> ·
+            status <strong style="color:@(Mic.IsReceiving ? "#6ad06a" : "#e26a6a")">
+                @(Mic.IsReceiving ? "● receiving" : "● idle")</strong> ·
+            packets <strong>@Mic.Packets</strong> ·
+            drops <strong>@Mic.Dropped</strong> ·
+            last pkt <strong>@Since(Mic.SinceLastPacket)</strong> ·
+            pkt peak <strong>@Mic.LastPacketPeak</strong> ·
+            ui ticks <strong>@_ticks</strong>
+        </div>
+        @if (!string.IsNullOrEmpty(Mic.LastError))
+        {
+            <div class="vb-muted" style="color:#e26a6a;margin-top:6px;">err: @Mic.LastError</div>
+        }
+    </div>
+
+    <div class="vb-row">
+        <div class="vb-panel">
+            <h2 class="vb" style="color:#5fbfff;">Left channel</h2>
+            @Wave(_left, "#5fbfff")
+            <div class="vb-muted">peak <strong>@_lPeak</strong> · rms <strong>@_lRms.ToString("F0")</strong></div>
+        </div>
+        <div class="vb-panel">
+            <h2 class="vb" style="color:#ffb45f;">Right channel</h2>
+            @Wave(_right, "#ffb45f")
+            <div class="vb-muted">peak <strong>@_rPeak</strong> · rms <strong>@_rRms.ToString("F0")</strong></div>
+        </div>
+    </div>
+
+    <div class="vb-panel">
+        <h2 class="vb">Direction of arrival</h2>
+        <div class="vb-arrow @(Live ? "" : "unsure")" style="@(_haveFix ? "" : "opacity:.4")">
+            @for (int d = -90; d <= 90; d += 30)
+            {
+                var pct = (d + 90) / 180.0 * 100;
+                <div class="tk" style="left:@Inv(pct)%"></div>
+            }
+            @if (_haveFix)
+            {
+                <div class="mk" style="left:@Inv(MarkerPct())%;opacity:@(Live ? "1" : "0.45")"></div>
+            }
+        </div>
+        <div class="vb-axis">
+            <span>← L (−90°)</span><span>broadside (0°)</span><span>(+90°) R →</span>
+        </div>
+        <div class="vb-muted" style="margin-top:8px;">
+            @if (!_haveFix)
+            {
+                <text>waiting for a sound… (RMS &lt; @MinRms or confidence &lt; @MinConf.ToString("F2"))</text>
+            }
+            else if (Live)
+            {
+                <text><strong style="color:#6ad06a;">● LIVE</strong> ·
+                    angle <strong>@_displayAngle.ToString("F1")°</strong> ·
+                    <strong>@_hint</strong> ·
+                    τ <strong>@_tdoaUs.ToString("F0") µs</strong> ·
+                    conf <strong>@_conf.ToString("F2")</strong></text>
+            }
+            else
+            {
+                <text><strong style="color:#7a8190;">○ held</strong> ·
+                    last angle <strong>@_displayAngle.ToString("F1")°</strong> ·
+                    <strong>@_hint</strong> · (make a sound to update)</text>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    private const int WaveSamples = 800;   // ~50 ms @ 16 kHz
+    private const int DoaSamples  = 512;   // ~32 ms
+    private const int Fps         = 15;
+
+    // ── DoA stability tuning ────────────────────────────────────────────
+    // The raw cross-correlation produces a fresh estimate every frame.
+    // On silence/noise the peak is essentially random, so without gating
+    // the marker flails. We therefore only ACCEPT a new estimate when:
+    //   (a) the louder channel's RMS exceeds MinRms (there's real signal), and
+    //   (b) the correlation confidence exceeds MinConf (the peak is sharp).
+    // Accepted estimates are then smoothed with an exponential moving
+    // average. When no estimate is accepted we HOLD the last good angle
+    // and fade the marker, instead of jumping to garbage.
+    private const double MinRms  = 1500;   // signal floor (post-gain). Raise if jumpy in a noisy room.
+    private const double MinConf = 0.55;   // correlation sharpness floor
+    private const double Ema     = 0.30;   // smoothing: lower = steadier, higher = snappier
+    private const double HoldSeconds = 1.0; // how long to keep showing the last fix after signal stops
+
+    private short[] _left = Array.Empty<short>();
+    private short[] _right = Array.Empty<short>();
+    private int _lPeak, _rPeak;
+    private double _lRms, _rRms;
+    private double _tdoaUs, _rawAngle, _conf;
+    private double _displayAngle;          // smoothed, shown on the dial
+    private bool   _haveFix;               // have we ever locked a direction?
+    private DateTime _lastFixUtc = DateTime.MinValue;
+    private string _hint = "—";
+    private long _ticks;
+
+    private System.Threading.Timer? _timer;
+    private double _baseline, _sampleRate;
+    private int _maxLag;
+
+    private bool Live => _haveFix &&
+        (DateTime.UtcNow - _lastFixUtc).TotalSeconds < HoldSeconds;
+
+    protected override void OnInitialized()
+    {
+        var o = Opts.Value;
+        _baseline = o.BaselineMeters;
+        _sampleRate = o.SampleRate;
+        _maxLag = Math.Max(1, (int)Math.Ceiling(_baseline / Doa.SpeedOfSound * _sampleRate * 1.1));
+    }
+
+    // Start the refresh timer only once the component is interactive
+    // (OnAfterRender firstRender), never during the static prerender pass.
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (!firstRender || _timer is not null) return;
+        _timer = new System.Threading.Timer(async _ =>
+        {
+            Interlocked.Increment(ref _ticks);
+            try { Refresh(); await InvokeAsync(StateHasChanged); }
+            catch (Exception ex) { Log.LogError(ex, "tick failed"); }
+        }, null, 100, 1000 / Fps);
+    }
+
+    private void Refresh()
+    {
+        var snap = Mic.Snapshot(WaveSamples);
+        if (snap is null) return;
+        _left  = snap[0];
+        _right = snap.Length > 1 ? snap[1] : Array.Empty<short>();
+
+        _lPeak = PeakAbs(_left);  _lRms = Rms(_left);
+        _rPeak = PeakAbs(_right); _rRms = Rms(_right);
+
+        if (_right.Length == 0) { _conf = 0; return; }
+
+        int n = Math.Min(DoaSamples, _left.Length);
+        var (lag, conf) = Doa.CrossCorrelate(
+            _left.AsSpan(_left.Length - n), _right.AsSpan(_right.Length - n), _maxLag);
+        double tdoaS = lag / _sampleRate;
+        _tdoaUs   = tdoaS * 1e6;
+        _rawAngle = Doa.TdoaToAngleDeg(tdoaS, _baseline);
+        _conf     = conf;
+
+        // Gate: only accept the estimate if there's real signal AND the
+        // correlation peak is sharp. Otherwise leave the displayed angle
+        // untouched (hold the last good fix).
+        bool loudEnough = Math.Max(_lRms, _rRms) >= MinRms;
+        if (loudEnough && conf >= MinConf)
+        {
+            if (!_haveFix) { _displayAngle = _rawAngle; _haveFix = true; }
+            else           { _displayAngle += Ema * (_rawAngle - _displayAngle); }
+            _lastFixUtc = DateTime.UtcNow;
+        }
+
+        _hint = _displayAngle switch { < -10 => "← LEFT", > 10 => "RIGHT →", _ => "CENTER" };
+    }
+
+    private double MarkerPct() => (Math.Clamp(_displayAngle, -90, 90) + 90) / 180.0 * 100.0;
+    private static string Inv(double v) =>
+        v.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static int PeakAbs(short[] xs)
+    {
+        int p = 0;
+        foreach (var x in xs) { int a = x < 0 ? -x : x; if (a > p) p = a; }
+        return p;
+    }
+    private static double Rms(short[] xs)
+    {
+        if (xs.Length == 0) return 0;
+        double ss = 0; foreach (var x in xs) ss += (double)x * x;
+        return Math.Sqrt(ss / xs.Length);
+    }
+
+    private static string Since(TimeSpan ts) => ts == TimeSpan.MaxValue ? "never"
+        : ts.TotalSeconds < 1 ? $"{ts.TotalMilliseconds:F0} ms"
+        : ts.TotalSeconds < 60 ? $"{ts.TotalSeconds:F1} s" : $"{ts.TotalMinutes:F1} min";
+
+    // Build the waveform SVG server-side: Blazor diffs one markup blob,
+    // which is cheap to push over the SignalR circuit.
+    private RenderFragment Wave(short[] s, string stroke) => b =>
+    {
+        const int W = 800, H = 120;
+        if (s.Length == 0)
+        {
+            b.AddMarkupContent(0, $"<svg class='vb-wave' viewBox='0 0 {W} {H}' preserveAspectRatio='none'></svg>");
+            return;
+        }
+        var sb = new System.Text.StringBuilder(s.Length * 6);
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        for (int i = 0; i < s.Length; i++)
+        {
+            double x = i * (double)W / s.Length;
+            double y = H / 2.0 - (s[i] / 32768.0) * (H / 2.0);
+            sb.Append(i == 0 ? 'M' : 'L').AppendFormat(ci, "{0:F1} {1:F1} ", x, y);
+        }
+        b.AddMarkupContent(0,
+            $"<svg class='vb-wave' viewBox='0 0 {W} {H}' preserveAspectRatio='none'>" +
+            $"<line x1='0' y1='{H/2}' x2='{W}' y2='{H/2}' stroke='#1c2030'/>" +
+            $"<path d='{sb}' fill='none' stroke='{stroke}' stroke-width='1.2'/></svg>");
+    };
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_timer is not null) { await _timer.DisposeAsync(); _timer = null; }
+    }
+}

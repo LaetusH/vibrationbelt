@@ -17,7 +17,7 @@ log = logging.getLogger("vibrationbelt")
 
 # ─── Wire-format constants (must match firmware/src/config.h) ─────────────
 
-SAMPLE_RATE  = 16000
+SAMPLE_RATE  = 8000                     # must match firmware cfg::SAMPLE_RATE_HZ
 CHANNELS     = 2                        # must match firmware cfg::CHANNELS
 SAMPLE_DTYPE = np.int16
 DEFAULT_PORT = 4444
