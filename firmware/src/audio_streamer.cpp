@@ -1,0 +1,174 @@
+#include "audio_streamer.h"
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+#include "config.h"
+#include "pdm_capture.h"
+#include "protocol.h"
+
+namespace streamer {
+namespace {
+
+WiFiUDP g_udp;
+
+// Current subscriber. Volatile because audioTask reads it on core 1 while
+// pollAccept() (core 0) writes it. Single producer / single consumer means
+// torn reads of IPAddress are theoretically possible but practically benign
+// (worst case: one packet sent to an old destination).
+volatile uint32_t g_sub_ip       = 0;       // IPv4 as uint32, 0 = no subscriber
+volatile uint16_t g_sub_port     = 0;
+volatile uint32_t g_sub_last_ms  = 0;
+
+constexpr size_t BYTES_PER_FRAME = cfg::CHANNELS * sizeof(int16_t);
+constexpr size_t AUDIO_BYTES     = cfg::DMA_FRAME_NUM * BYTES_PER_FRAME;
+constexpr size_t PACKET_BYTES    = sizeof(proto::PacketHeader) + AUDIO_BYTES;
+
+static_assert(PACKET_BYTES <= 1472,
+              "Packet exceeds typical Ethernet MTU minus UDP/IP headers; "
+              "reduce cfg::DMA_FRAME_NUM to avoid IP fragmentation.");
+
+/// In-place DC removal followed by saturating int16 gain.
+/// One-pole IIR high-pass at ≈12 Hz to strip the PDM mic's DC bias before
+/// gain; otherwise even small gain pegs every sample at −32768.
+/// Filter state persists between calls — do NOT reset per-buffer.
+inline void dcBlockAndGain(int16_t* samples, size_t n) {
+    constexpr float ALPHA = 0.995f;
+    constexpr float GAIN  = cfg::AUDIO_GAIN;
+
+    static float prev_x = 0.0f;
+    static float prev_y = 0.0f;
+
+    for (size_t i = 0; i < n; ++i) {
+        const float x = static_cast<float>(samples[i]);
+        const float y = ALPHA * (prev_y + x - prev_x);
+        prev_x = x;
+        prev_y = y;
+
+        float v = y * GAIN;
+        if (v >  32767.0f) v =  32767.0f;
+        if (v < -32768.0f) v = -32768.0f;
+        samples[i] = static_cast<int16_t>(v);
+    }
+}
+
+[[noreturn]] void audioTask(void*) {
+    // [PacketHeader | audio] in one contiguous buffer, sent in one UDP send.
+    alignas(4) static uint8_t packet[PACKET_BYTES];
+    auto* hdr   = reinterpret_cast<proto::PacketHeader*>(packet);
+    auto* audio = reinterpret_cast<int16_t*>(packet + sizeof(proto::PacketHeader));
+
+    uint32_t seq = 0;
+    uint64_t last_report_us = esp_timer_get_time();
+    uint32_t pkts_since_report = 0;
+
+    Serial.printf("[audio] task on core %d  packet=%u B (hdr %u + audio %u)\n",
+                  xPortGetCoreID(),
+                  (unsigned)PACKET_BYTES,
+                  (unsigned)sizeof(proto::PacketHeader),
+                  (unsigned)AUDIO_BYTES);
+
+    for (;;) {
+        const uint64_t t_us = esp_timer_get_time();
+        const size_t got = pdm::read(audio, AUDIO_BYTES);
+        if (got == 0) continue;
+
+        dcBlockAndGain(audio, got / sizeof(int16_t));
+
+        // Keep DMA in lock-step with realtime even when nobody's listening.
+        // We don't mutate g_sub_ip from here (that's pollAccept's job on
+        // the other core); we just gate sending on freshness.
+        static bool expired_logged = false;
+        const uint32_t sub_ip   = g_sub_ip;
+        const uint16_t sub_port = g_sub_port;
+        const bool fresh = sub_ip != 0
+            && (millis() - g_sub_last_ms) < cfg::UDP_SUBSCRIBER_TIMEOUT_MS;
+        if (!fresh) {
+            if (sub_ip != 0 && !expired_logged) {
+                Serial.println("[udp] subscriber expired (no keepalive)");
+                expired_logged = true;
+            }
+            continue;
+        }
+        expired_logged = false;
+
+        memcpy(hdr->magic, proto::MAGIC, 4);
+        hdr->seq    = seq++;
+        hdr->t_us   = t_us;
+        hdr->n_samp = got / BYTES_PER_FRAME;
+
+        const size_t total = sizeof(proto::PacketHeader) + got;
+        IPAddress dst(sub_ip);
+        g_udp.beginPacket(dst, sub_port);
+        g_udp.write(packet, total);
+        g_udp.endPacket();   // returns 1 on success; we don't retry on fail
+
+        pkts_since_report++;
+
+        if (t_us - last_report_us > 1'000'000) {
+            const float secs = (t_us - last_report_us) / 1e6f;
+            Serial.printf("[audio] seq=%u  %.1f pkts/s  RSSI=%d  sub=%s:%u\n",
+                          (unsigned)seq,
+                          pkts_since_report / secs,
+                          WiFi.RSSI(),
+                          dst.toString().c_str(),
+                          (unsigned)sub_port);
+            pkts_since_report = 0;
+            last_report_us = t_us;
+        }
+    }
+}
+
+}  // namespace
+
+void start() {
+    if (!g_udp.begin(cfg::STREAM_PORT)) {
+        Serial.println("[udp] FAILED to bind socket");
+    } else {
+        Serial.printf("[udp] listening on %s:%u  (send any UDP packet here "
+                      "to subscribe)\n",
+                      WiFi.localIP().toString().c_str(), cfg::STREAM_PORT);
+    }
+
+    xTaskCreatePinnedToCore(
+        audioTask, "audio",
+        cfg::AUDIO_TASK_STACK, /*arg*/ nullptr,
+        cfg::AUDIO_TASK_PRIORITY, /*handle*/ nullptr,
+        cfg::AUDIO_TASK_CORE);
+}
+
+void pollAccept() {
+    // Drain any incoming UDP packets. Each one (re)subscribes its source.
+    while (true) {
+        int n = g_udp.parsePacket();
+        if (n <= 0) break;
+
+        // Read & discard the payload.
+        uint8_t scratch[64];
+        while (g_udp.available() > 0) {
+            g_udp.read(scratch, sizeof(scratch));
+        }
+
+        const IPAddress src = g_udp.remoteIP();
+        const uint16_t srcPort = g_udp.remotePort();
+        const uint32_t now = millis();
+
+        const uint32_t new_ip = (uint32_t)src;
+        const bool new_sub = (new_ip != g_sub_ip) || (srcPort != g_sub_port);
+
+        g_sub_ip = new_ip;
+        g_sub_port = srcPort;
+        g_sub_last_ms = now;
+
+        if (new_sub) {
+            Serial.printf("[udp] subscriber: %s:%u\n",
+                          src.toString().c_str(), (unsigned)srcPort);
+        }
+    }
+}
+
+}  // namespace streamer
