@@ -392,3 +392,13 @@ class MultiStreamAnalyzer:
                 yield detection
             # If None (timeout), just loop again and keep waiting
 
+
+    def close(self) -> None:
+        """Close all processors and cleanup."""
+        for source, processor in self.processors.items():
+            try:
+                processor.close()
+            except Exception as e:
+                log.error(f"Error closing processor {source}: {e}")
+        self.processors.clear()
+        log.info("MultiStreamAnalyzer closed")
