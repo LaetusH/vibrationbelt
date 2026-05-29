@@ -79,34 +79,13 @@ class AlarmRecognizer:
         return result
 
     def _recognize_template(self, spec: np.ndarray, debug: bool = False) -> Dict:
-        """Template-based recognition using cosine similarity."""
-        if not self.templates:
-            return {
-                'is_alarm': False,
-                'confidence': 0.0,
-                'method': 'template',
-                'details': {'reason': 'no_templates_loaded'} if debug else {},
-            }
-        
-        # Flatten for comparison
-        spec_flat = spec.flatten()
-        
-        # Compare with all templates
+        """Template-based recognition - DISABLED without training data."""
+        # Template matching w/o real training data causes false positives!
+        # Must train CNN with real alarm data (see models/cnn_trainer.py)
         max_similarity = 0.0
         best_template = None
         similarities = {}
-        
-        for name, template in self.templates.items():
-            sim = self._cosine_similarity(spec_flat, template.flatten())
-            similarities[name] = sim
-            
-            if sim > max_similarity:
-                max_similarity = sim
-                best_template = name
-        
-        # Threshold for alarm detection
-        threshold = 0.6
-        is_alarm = max_similarity > threshold
+        is_alarm = False  # ALWAYS false until CNN is trained
         
         result = {
             'is_alarm': is_alarm,
@@ -184,11 +163,25 @@ class AlarmRecognizer:
 
     def _load_templates(self):
         """Load stored alarm templates."""
-        # For now, create synthetic templates from captured alarm data
-        # TODO: Load from saved templates directory
+        templates_file = os.path.join(
+            os.path.dirname(__file__), 
+            'templates', 
+            'alarm_templates.pkl'
+        )
         
-        # Placeholder: create a dummy template
-        self.templates['alarm_baseline'] = np.random.rand(224, 224).astype(np.float32) * 0.3
+        # Try to load from disk
+        if os.path.exists(templates_file):
+            self.load_templates_from_file(templates_file)
+        else:
+            # Bootstrap with synthetic templates
+            self._create_synthetic_templates()
+    
+    def _create_synthetic_templates(self):
+        """Create synthetic templates for bootstrapping."""
+        from .template_builder import AlarmTemplate, SilenceTemplate
+        
+        self.templates['alarm_synthetic'] = AlarmTemplate.create_synthetic()
+        self.templates['silence_synthetic'] = SilenceTemplate.create_synthetic()
 
     def add_template(self, name: str, spectrogram: np.ndarray):
         """Add a new template (for calibration/training)."""
