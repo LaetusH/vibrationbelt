@@ -30,6 +30,7 @@
 
 #include "audio_streamer.h"
 #include "config.h"
+#include "motoren.h"
 #include "pdm_capture.h"
 #include "wifi_mgr.h"
 
@@ -42,13 +43,21 @@ void setup() {
                   cfg::BITS_PER_SAMPLE, (double)cfg::AUDIO_GAIN,
                   (unsigned)cfg::DMA_FRAME_NUM);
 
+    motoren_setup();            // initialise PWM on GPIO 32 + 33
     wifi_mgr::connect();        // blocks until associated or reboots
     pdm::init();                // starts DMA capture (+ warm-up)
-    streamer::start();          // listens on TCP + spawns audio task
+    streamer::start();          // listens on UDP + spawns audio task
 }
 
 void loop() {
     wifi_mgr::tick();           // reconnect if dropped, otherwise no-op
-    streamer::pollAccept();     // accept / clean up TCP clients
+    streamer::pollAccept();     // accept / clean up UDP subscribers
+
+    // Handle serial motor commands (e.g. "m1 80", "alle 50", "alle stop")
+    if (Serial.available()) {
+        String cmd = Serial.readStringUntil('\n');
+        befehl_verarbeiten(cmd);
+    }
+
     delay(20);
 }
