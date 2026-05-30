@@ -3,20 +3,21 @@
 Train CNN model for alarm detection.
 """
 
-import numpy as np
-from pathlib import Path
-import sys
-
-try:
-    import torch
-    import torch.nn as nn
-    import torch.optim as optim
-    from torch.utils.data import Dataset, DataLoader, random_split
-    from torch.utils.tensorboard import SummaryWriter
-except ImportError:
-    print("❌ PyTorch required. Install with:")
-    print("   pip install torch")
-    sys.exit(1)
+import numpy as np                                                                                                                                                                     
+from pathlib import Path                                                                                                                                                               
+import sys                                                                                                                                                                             
+                                                                                                                                                                                         
+try:                                                                                                                                                                                   
+    import torch                                                                                                                                                                       
+    import torch.nn as nn                                                                                                                                                              
+    import torch.optim as optim                                                                                                                                                        
+    from torch.utils.data import Dataset, DataLoader, random_split                                                                                                                     
+    from torch.utils.tensorboard import SummaryWriter                                                                                                                                  
+except ImportError:                                                                                                                                                                    
+    print("❌ PyTorch required. Install with:")                                                                                                                                        
+    print("   pip3 install torch")                                                                                                                                                     
+    print("   or: python3 -m pip install --upgrade torch")                                                                                                                             
+    sys.exit(1) 
 
 
 class SpectrogramDataset(Dataset):

@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """
-Live Analysis - Connect to DebugClient and analyze audio in real-time.
+Live Analysis with YAMNet - Classify audio events using Google's audio model
 
-Reads dual-mic audio from the C# DebugClient's MicReceiver service,
-runs analysis_engine pipeline, and displays results.
+Uses YAMNet to detect:
+  - Sirens (Feuerwehr, Krankenwagen, Polizei)
+  - Vehicle horns
+  - Emergency vehicle sounds
+  - Other relevant events
+
+Ignores:
+  - Music, speech, ambient noise
+  - Applause, laughter, crowd noise
+  - Other non-relevant sounds
 
 Usage:
-    python3 run_live_analysis.py [--url http://localhost:5262] [--interval 100]
-    
-Options:
-    --url       DebugClient URL (default: http://localhost:5262)
-    --interval  Analysis interval in ms (default: 100ms = 10 Hz)
-    --simulate  Use simulated audio instead of real DebugClient
+    python3 run_live_analysis_yamnet.py [--url http://localhost:5262] [--interval 100]
 """
 
 import sys
@@ -19,44 +22,166 @@ import time
 import argparse
 from pathlib import Path
 from collections import deque
+from typing import Dict, List, Tuple
 
 import numpy as np
+
+try:
+    import tensorflow as tf
+    import tensorflow_hub as hub
+except ImportError:
+    print("❌ Missing dependencies:")
+    print("   pip install tensorflow tensorflow-hub")
+    sys.exit(1)
 
 # Add parent to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from analysis_engine import AudioAnalysisPipeline
 from analysis_engine.motor_mapper import MotorMapper
 
+# ============================================================================
+# YAMNet CLASS MAPPING - Alarm-Relevant Classes Only
+# ============================================================================
 
-# Alarm type mappings
-ALARM_TYPES = {
-    0: "🔴 Feuerwehr",
-    1: "🟠 Krankenwagen",
-    2: "🟡 Rauchmelder",
-    3: "🔵 Polizei",
-    4: "🟢 Hupe",
+# YAMNet class indices for relevant sounds
+YAMNET_ALARM_CLASSES = {
+    # Sirens & Emergency Vehicles
+    399: "🚨 Siren",                      # Siren
+    400: "🚓 Police Car Siren",            # Police car siren  
+    401: "🚑 Ambulance Siren",             # Ambulance siren
+    402: "🚒 Fire Engine Siren",           # Fire engine/Truck siren
+    
+    # Vehicle Horns
+    377: "🚙 Vehicle Horn",                # Vehicle horn, car horn, honking
+    378: "🚗 Beep",                        # Beep, bleep
+    
+    # Other Vehicles
+    379: "🏎️ Race Car",                   # Race car, accelerating
+    383: "🚛 Truck",                       # Truck
+}
+
+# Classes to IGNORE (return false alarm)
+YAMNET_IGNORE_CLASSES = {
+    # Speech & Vocalizations
+    0: "Speech",
+    1: "Child speech, kid speaking",
+    # Music
+    68: "Music",
+    69: "Musical instrument",
+    # Crowd & Applause
+    117: "Applause",
+    118: "Crowd",
+    119: "Cheering",
+    # Environmental
+    146: "Wind",
+    147: "Rain",
+    148: "Thunderstorm",
+}
+
+# Map alarm types for display
+ALARM_TYPE_NAMES = {
+    399: "🚨 Siren",
+    400: "🚓 Polizei",
+    401: "🚑 Krankenwagen",
+    402: "🚒 Feuerwehr",
+    377: "🚙 Hupe",
 }
 
 
-class LiveAnalyzer:
-    """Monitor DebugClient and analyze audio in real-time."""
+class YAMNetAnalyzer:
+    """Analyze audio using Google's YAMNet model."""
     
-    def __init__(self, pipeline: AudioAnalysisPipeline, interval_ms: int = 100):
-        self.pipeline = pipeline
+    def __init__(self, interval_ms: int = 100, confidence_threshold: float = 0.3):
         self.interval_s = interval_ms / 1000.0
+        self.confidence_threshold = confidence_threshold
+        
+        # Load YAMNet model
+        print("📥 Loading YAMNet model from TensorFlow Hub...")
+        self.model = hub.load('https://www.kaggle.com/models/google/yamnet/TensorFlow2/yamnet/1')
+        print("✅ YAMNet model loaded")
         
         # History for smoothing
         self.doa_history = deque(maxlen=5)
         self.confidence_history = deque(maxlen=5)
         self.alarm_history = deque(maxlen=3)
-        self.alarm_type_history = deque(maxlen=5)  # Track alarm type
+        self.alarm_type_history = deque(maxlen=5)
         
         # Stats
         self.total_chunks = 0
         self.alarms_detected = 0
-        self.alarm_type_counts = {i: 0 for i in range(5)}  # Count each type
+        self.alarm_type_counts = {}
         self.start_time = time.time()
+    
+    def analyze_chunk(self, audio_mic1: np.ndarray, audio_mic2: np.ndarray = None) -> Dict:
+        """
+        Analyze audio chunk with YAMNet.
+        
+        Args:
+            audio_mic1: Primary mic audio (float32, 16kHz)
+            audio_mic2: Secondary mic audio for DOA (optional)
+            
+        Returns:
+            {
+                'is_alarm': bool,
+                'alarm_confidence': float (0-1),
+                'alarm_class': int,
+                'alarm_name': str,
+                'doa_degrees': float or None,
+            }
+        """
+        result = {
+            'is_alarm': False,
+            'alarm_confidence': 0.0,
+            'alarm_class': None,
+            'alarm_name': 'Unknown',
+            'doa_degrees': None,
+        }
+        
+        # Use mono audio (mix both channels if available)
+        if audio_mic2 is not None:
+            # Simple averaging for mono
+            audio = (audio_mic1 + audio_mic2) / 2
+        else:
+            audio = audio_mic1
+        
+        # Ensure correct type and range
+        audio = np.clip(audio.astype(np.float32), -1.0, 1.0)
+        
+        try:
+            # YAMNet inference
+            scores, embeddings, spectrogram = self.model(audio)
+            
+            # Get top predictions
+            top_class_idx = int(np.argmax(scores[0].numpy()))
+            top_confidence = float(scores[0].numpy()[top_class_idx])
+            
+            # Check if this is an alarm class
+            if top_class_idx in YAMNET_ALARM_CLASSES:
+                result['is_alarm'] = True
+                result['alarm_confidence'] = top_confidence
+                result['alarm_class'] = top_class_idx
+                result['alarm_name'] = YAMNET_ALARM_CLASSES[top_class_idx]
+            
+            # Check if it's in ignore list (overrides alarm detection)
+            elif top_class_idx in YAMNET_IGNORE_CLASSES:
+                result['is_alarm'] = False
+                result['alarm_confidence'] = 0.0
+            
+            # Anything else below confidence threshold
+            elif top_confidence < self.confidence_threshold:
+                result['is_alarm'] = False
+                result['alarm_confidence'] = 0.0
+            else:
+                # Unknown sound above threshold - be cautious
+                result['is_alarm'] = False
+                result['alarm_confidence'] = 0.0
+        
+        except Exception as e:
+            print(f"❌ YAMNet analysis error: {e}")
+            result['is_alarm'] = False
+            result['alarm_confidence'] = 0.0
+        
+        return result
     
     def run(self, audio_data_generator):
         """
@@ -66,39 +191,37 @@ class LiveAnalyzer:
             audio_data_generator: yields (mic1_audio, mic2_audio) tuples
         """
         print("\n" + "="*90)
-        print("🎤 LIVE ANALYSIS ENGINE")
+        print("🎤 LIVE ANALYSIS ENGINE (YAMNet)")
         print("="*90)
-        print("Listening for audio from DebugClient...")
-        print("Alarm types: 🔴 Feuerwehr | 🟠 Krankenwagen | 🟡 Rauchmelder | 🔵 Polizei | 🟢 Hupe\n")
+        print("Listening for alarms using Google YAMNet...")
+        print("Relevant: Sirens | Horns | Emergency Vehicles")
+        print("Ignored:  Music | Speech | Ambient Noise\n")
         
         try:
             for mic1_audio, mic2_audio in audio_data_generator:
-                # Analyze
-                result = self.pipeline.analyze(
-                    audio_mic1=mic1_audio,
-                    audio_mic2=mic2_audio,
-                    debug=False
-                )
+                # Analyze with YAMNet
+                result = self.analyze_chunk(mic1_audio, mic2_audio)
                 
                 # Update history
                 self.total_chunks += 1
-                if result['doa_degrees'] is not None:
-                    self.doa_history.append(result['doa_degrees'])
                 self.confidence_history.append(result['alarm_confidence'])
                 self.alarm_history.append(result['is_alarm'])
                 
                 if result['is_alarm']:
                     self.alarms_detected += 1
-                    alarm_type = self._classify_alarm(result)
-                    self.alarm_type_history.append(alarm_type)
-                    self.alarm_type_counts[alarm_type] += 1
+                    alarm_class = result['alarm_class']
+                    self.alarm_type_history.append(alarm_class)
+                    
+                    if alarm_class not in self.alarm_type_counts:
+                        self.alarm_type_counts[alarm_class] = 0
+                    self.alarm_type_counts[alarm_class] += 1
                 
                 # Display
                 self._display_result(result)
                 
                 # Sleep for interval
                 time.sleep(self.interval_s)
-                
+        
         except KeyboardInterrupt:
             print("\n\n⏹️  Stopped by user")
         except Exception as e:
@@ -107,63 +230,35 @@ class LiveAnalyzer:
         finally:
             self._print_stats()
     
-    def _classify_alarm(self, result):
-        """
-        Classify which type of alarm was detected.
-        
-        This uses CNN confidence breakdown if available,
-        otherwise defaults to 0 (Feuerwehr).
-        """
-        # If debug info has alarm class, use it
-        if 'alarm_debug' in result and isinstance(result['alarm_debug'], dict):
-            if 'alarm_class' in result['alarm_debug']:
-                return result['alarm_debug']['alarm_class']
-        
-        # If logits are available, use argmax
-        if 'alarm_debug' in result and isinstance(result['alarm_debug'], dict):
-            if 'logits' in result['alarm_debug']:
-                logits = result['alarm_debug']['logits']
-                if isinstance(logits, list) and len(logits) >= 5:
-                    return int(np.argmax(logits))
-        
-        # Default to Feuerwehr
-        return 0
-    
     def _display_result(self, result):
         """Pretty-print analysis result."""
         
         # Smoothed values
-        doa_smooth = np.mean(self.doa_history) if self.doa_history else None
         conf_smooth = np.mean(self.confidence_history) if self.confidence_history else 0
         alarm_consensus = sum(self.alarm_history) > len(self.alarm_history) / 2
-        
-        # Direction indicator
-        if doa_smooth is not None:
-            direction = self._get_direction_emoji(doa_smooth)
-        else:
-            direction = "❓"
         
         # Alarm indicator & type
         if alarm_consensus and self.alarm_type_history:
             # Most common alarm type in recent history
-            most_common_type = max(set(self.alarm_type_history), 
-                                   key=list(self.alarm_type_history).count)
-            alarm_emoji = ALARM_TYPES.get(most_common_type, "❓")
+            most_common_class = max(set(self.alarm_type_history),
+                                    key=list(self.alarm_type_history).count)
+            alarm_emoji = YAMNET_ALARM_CLASSES.get(most_common_class, "❓")
             alarm_str = f"🚨 {alarm_emoji}"
         else:
             alarm_str = "  🔇 quiet"
-        
-        # Motor prediction
-        if result['predicted_motor'] is not None:
-            motor_label = MotorMapper.get_sector_label(result['predicted_motor'])
-            motor_str = f"🎮 Motor {result['predicted_motor']} ({motor_label})"
-        else:
-            motor_str = "🎮 Motor -"
         
         # Confidence bar
         bar_len = 20
         filled = int(conf_smooth * bar_len)
         bar = "█" * filled + "░" * (bar_len - filled)
+        
+        # Current detection info
+        if result['is_alarm']:
+            current_class_name = YAMNET_ALARM_CLASSES.get(result['alarm_class'], "?")
+            current_conf = f" ({result['alarm_confidence']*100:.0f}%)"
+        else:
+            current_class_name = ""
+            current_conf = ""
         
         # Print
         elapsed = time.time() - self.start_time
@@ -171,23 +266,9 @@ class LiveAnalyzer:
         elapsed_sec = int(elapsed % 60)
         
         print(f"[{elapsed_min:02d}:{elapsed_sec:02d}] "
-              f"{direction} {doa_smooth:6.1f}° | "
               f"[{bar}] {conf_smooth*100:5.1f}% | "
-              f"{alarm_str:20} | "
-              f"{motor_str}")
-    
-    def _get_direction_emoji(self, doa_degrees):
-        """Get emoji for direction."""
-        angle = doa_degrees % 360
-        
-        if angle < 45 or angle >= 315:
-            return "⬆️ "
-        elif 45 <= angle < 135:
-            return "➡️ "
-        elif 135 <= angle < 225:
-            return "⬇️ "
-        else:
-            return "⬅️ "
+              f"{alarm_str:25} | "
+              f"{current_class_name}{current_conf}")
     
     def _print_stats(self):
         """Print final statistics."""
@@ -205,18 +286,17 @@ class LiveAnalyzer:
         # Alarm type breakdown
         if self.alarms_detected > 0:
             print(f"\n🚨 Alarm Types Detected:")
-            for alarm_type, count in self.alarm_type_counts.items():
-                if count > 0:
-                    emoji = ALARM_TYPES.get(alarm_type, "❓")
-                    pct = (count / self.alarms_detected) * 100
-                    print(f"   {emoji}: {count} ({pct:.1f}%)")
+            for alarm_class, count in sorted(self.alarm_type_counts.items()):
+                name = YAMNET_ALARM_CLASSES.get(alarm_class, "Unknown")
+                pct = (count / self.alarms_detected) * 100
+                print(f"   {name}: {count} ({pct:.1f}%)")
         
         print("="*90 + "\n")
 
 
 def simulate_audio_data(duration_s: float = 30):
     """
-    Simulate dual-mic audio data for testing (without real DebugClient).
+    Simulate dual-mic audio data for testing.
     
     Yields: (mic1_audio, mic2_audio) tuples
     """
@@ -225,20 +305,18 @@ def simulate_audio_data(duration_s: float = 30):
     
     elapsed = 0
     while elapsed < duration_s:
-        # Simulate alarm-like sound (sine sweep)
+        # Simulate alarm-like sound (sine sweep 2-4 kHz)
         t = np.arange(chunk_size) / sample_rate
-        
-        # Frequency sweep 2-4 kHz (alarm-like)
         f_start, f_end = 2000, 4000
         freq = f_start + (f_end - f_start) * (elapsed / duration_s)
         
         mic1 = 0.3 * np.sin(2 * np.pi * freq * t).astype(np.float32)
-        mic2 = 0.25 * np.sin(2 * np.pi * freq * t).astype(np.float32)  # Slightly delayed
+        mic2 = 0.25 * np.sin(2 * np.pi * freq * t).astype(np.float32)
         
         yield mic1, mic2
         
         elapsed += chunk_size / sample_rate
-        time.sleep(0.01)  # Simulate processing time
+        time.sleep(0.01)
 
 
 def fetch_audio_from_debugclient(url: str = "http://localhost:5262", interval_ms: int = 100):
@@ -251,11 +329,10 @@ def fetch_audio_from_debugclient(url: str = "http://localhost:5262", interval_ms
     
     print(f"📻 Connecting to DebugClient at {url}...")
     
-    # Calculate chunk size (100ms = 1600 samples at 16kHz)
     chunk_size = int(16000 * interval_ms / 1000)
     print(f"   Chunk size: {chunk_size} samples ({interval_ms}ms)")
     
-    # First check that DebugClient is running
+    # Check DebugClient
     try:
         resp = requests.get(f"{url}/api/audio/status", timeout=2)
         if resp.status_code == 200:
@@ -263,27 +340,19 @@ def fetch_audio_from_debugclient(url: str = "http://localhost:5262", interval_ms
             print(f"✅ Connected to DebugClient")
             print(f"   ESP32 IP: {status.get('espIp', 'unknown')}")
             print(f"   Packets received: {status.get('packetsReceived', 0)}")
-            print(f"   Is receiving: {status.get('isReceiving', False)}")
             
             if not status.get('isReceiving'):
                 print(f"\n⚠️  WARNING: DebugClient NOT receiving audio from ESP32!")
-                print(f"   Make sure ESP32 is running and connected.")
                 time.sleep(2)
     except Exception as e:
-        print(f"❌ Cannot connect to DebugClient at {url}")
-        print(f"   Error: {e}")
-        print(f"\n   To start DebugClient:")
-        print(f"   cd DebugClient && dotnet run")
-        print(f"\n   Falling back to simulated audio for testing...")
-        
-        # Use simulation
+        print(f"❌ Cannot connect to DebugClient: {e}")
+        print(f"   Falling back to simulated audio...")
         for audio in simulate_audio_data(duration_s=60):
             yield audio
         return
     
     print(f"\n🎤 Listening for live audio...\n")
     
-    # Fetch audio chunks continuously
     chunk_idx = 0
     consecutive_errors = 0
     first_data = True
@@ -291,7 +360,6 @@ def fetch_audio_from_debugclient(url: str = "http://localhost:5262", interval_ms
     try:
         while True:
             try:
-                # Get snapshot from DebugClient
                 resp = requests.get(
                     f"{url}/api/audio/snapshot?samples={chunk_size}",
                     timeout=5
@@ -300,49 +368,40 @@ def fetch_audio_from_debugclient(url: str = "http://localhost:5262", interval_ms
                 if resp.status_code == 200:
                     data = resp.json()
                     
-                    # data = {"channels": [ch0_data, ch1_data], ...}
                     if data.get("channels") and len(data["channels"]) >= 2:
                         ch0 = np.array(data["channels"][0], dtype=np.float32)
                         ch1 = np.array(data["channels"][1], dtype=np.float32)
                         
                         if first_data:
-                            print(f"✅ Receiving audio! ({data.get('sampleCount')} samples per chunk)\n")
+                            print(f"✅ Receiving audio!\n")
                             first_data = False
                         
                         yield ch0, ch1
                         chunk_idx += 1
                         consecutive_errors = 0
                     else:
-                        print(f"⚠️  Snapshot missing channels, retrying...")
                         time.sleep(0.1)
                         consecutive_errors += 1
                 
                 elif resp.status_code == 503:
-                    print(f"⏳ Waiting for ESP32 audio buffer to fill...")
                     time.sleep(0.5)
                     consecutive_errors += 1
-                    
                 else:
-                    print(f"⚠️  API error: {resp.status_code}")
                     time.sleep(0.5)
                     consecutive_errors += 1
                 
-                # Break on too many consecutive errors
                 if consecutive_errors > 10:
                     print(f"❌ Too many errors, giving up")
                     return
-                    
+            
             except requests.exceptions.Timeout:
-                print(f"⚠️  Request timeout ({chunk_idx} chunks OK)")
                 time.sleep(1)
                 consecutive_errors += 1
-                
             except requests.exceptions.ConnectionError as e:
-                print(f"❌ Lost connection to DebugClient: {e}")
+                print(f"❌ Lost connection: {e}")
                 return
-                
             except Exception as e:
-                print(f"❌ Unexpected error: {e}")
+                print(f"❌ Error: {e}")
                 time.sleep(1)
                 consecutive_errors += 1
     
@@ -353,7 +412,7 @@ def fetch_audio_from_debugclient(url: str = "http://localhost:5262", interval_ms
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Live analysis of audio from VibrationBelt DebugClient"
+        description="Live analysis with YAMNet (Google audio classification)"
     )
     parser.add_argument(
         "--url",
@@ -377,25 +436,17 @@ def main():
         default=60,
         help="Simulation duration in seconds (default: 60)"
     )
+    parser.add_argument(
+        "--confidence",
+        type=float,
+        default=0.3,
+        help="Confidence threshold (default: 0.3)"
+    )
     
     args = parser.parse_args()
     
-    # Initialize pipeline with CNN model (if available)
-    model_path = Path("models/alarm_detector.pt")
-    use_cnn = model_path.exists()
-    
-    if use_cnn:
-        print(f"✓ Using CNN model: {model_path}")
-        pipeline = AudioAnalysisPipeline(
-            model_path=str(model_path),
-            use_template_only=False
-        )
-    else:
-        print("ℹ️  No CNN model found, using template matching (disabled)")
-        pipeline = AudioAnalysisPipeline(use_template_only=True)
-    
     # Create analyzer
-    analyzer = LiveAnalyzer(pipeline, interval_ms=args.interval)
+    analyzer = YAMNetAnalyzer(interval_ms=args.interval, confidence_threshold=args.confidence)
     
     # Get audio source
     if args.simulate:
