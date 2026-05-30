@@ -143,8 +143,8 @@
     // Accepted estimates are then smoothed with an exponential moving
     // average. When no estimate is accepted we HOLD the last good angle
     // and fade the marker, instead of jumping to garbage.
-    private const double MinRms  = 1500;   // signal floor (post-gain). Raise if jumpy in a noisy room.
-    private const double MinConf = 0.55;   // correlation sharpness floor
+    private const double MinRms  = 400;   // signal floor (post-gain). Raise if jumpy in a noisy room.
+    private const double MinConf = 0.30;   // correlation sharpness floor
     private const double Ema     = 0.30;   // smoothing: lower = steadier, higher = snappier
     private const double HoldSeconds = 1.0; // how long to keep showing the last fix after signal stops
 
