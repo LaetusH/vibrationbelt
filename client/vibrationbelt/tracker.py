@@ -67,7 +67,8 @@ class DirectionFix:
     left_rms, right_rms
         Per-channel RMS over the analysis window.
     timestamp_us
-        ESP32 capture timestamp of the most recent packet in the window.
+        Receiver-side arrival time (microseconds, time.monotonic-based) of
+        the most recent packet in the window.
     """
     angle_deg: float
     raw_angle_deg: float
@@ -175,7 +176,7 @@ class DirectionTracker:
                    ) -> Iterator[DirectionFix]:
         """Yield a :class:`DirectionFix` for every incoming audio packet."""
         for chunk in self._stream.iter_chunks(timeout=timeout):
-            fix = self._ingest(chunk.samples, chunk.timestamp_us)
+            fix = self._ingest(chunk.samples, int(chunk.received_at * 1e6))
             if fix is not None:
                 yield fix
 

@@ -8,6 +8,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.Configure<BeltOptions>(builder.Configuration.GetSection("Belt"));
 builder.Services.AddSingleton<MicReceiver>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MicReceiver>());
+builder.Services.AddSingleton<BeltControl>();
 
 // Add CORS for Python analysis pipeline
 builder.Services.AddCors(options =>

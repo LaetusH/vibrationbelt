@@ -38,14 +38,12 @@ void onEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
             Serial.println("[wifi] associated with AP");
             break;
         case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-            Serial.printf("[wifi] got IP: %s\n",
-                          WiFi.localIP().toString().c_str());
+            Serial.printf("[wifi] got IP: %s\n", WiFi.localIP().toString().c_str());
             break;
         case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
             // Common reason codes: 15/202/204 = wrong password,
             // 201 = AP not found, 2/4 = expiry/idle.
-            Serial.printf("[wifi] disconnected, reason=%u\n",
-                          info.wifi_sta_disconnected.reason);
+            Serial.printf("[wifi] disconnected, reason=%u\n", info.wifi_sta_disconnected.reason);
             break;
         default:
             break;

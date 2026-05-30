@@ -101,7 +101,6 @@ long[] ssqs  = new long[CHANNELS];
 
 uint  expectedSeq = 0;
 bool  haveSeq = false;
-ulong firstTUs = 0, lastTUs = 0;
 long  totalFrames = 0;
 int   pkts = 0, drops = 0;
 long  totalAudioBytes = 0;
@@ -137,15 +136,15 @@ try
             continue;
         }
 
-        if (datagram.Length < 20) continue;
+        const int HEADER_LEN = 8;
+        if (datagram.Length < HEADER_LEN) continue;
         if (datagram[0] != (byte)'A' || datagram[1] != (byte)'U' ||
             datagram[2] != (byte)'D' || datagram[3] != (byte)'1') continue;
 
-        uint  seq    = BinaryPrimitives.ReadUInt32LittleEndian(datagram.AsSpan(4));
-        ulong tUs    = BinaryPrimitives.ReadUInt64LittleEndian(datagram.AsSpan(8));
-        uint  nSamp  = BinaryPrimitives.ReadUInt32LittleEndian(datagram.AsSpan(16));
-        int   payloadLen = (int)nSamp * BYTES_PER_FRAME;
-        if (datagram.Length < 20 + payloadLen) continue;
+        uint seq        = BinaryPrimitives.ReadUInt32LittleEndian(datagram.AsSpan(4));
+        int  payloadLen = ((datagram.Length - HEADER_LEN) / BYTES_PER_FRAME) * BYTES_PER_FRAME;
+        if (payloadLen <= 0) continue;
+        uint nSamp      = (uint)(payloadLen / BYTES_PER_FRAME);
 
         if (haveSeq && seq != expectedSeq)
         {
@@ -157,7 +156,7 @@ try
         haveSeq = true;
 
         var payload = new byte[payloadLen];
-        Buffer.BlockCopy(datagram, 20, payload, 0, payloadLen);
+        Buffer.BlockCopy(datagram, HEADER_LEN, payload, 0, payloadLen);
 
         if (gain != 1.0)
         {
@@ -178,8 +177,6 @@ try
         sink.Write(payload, 0, payloadLen);
         if (toStdout) sink.Flush();
 
-        if (firstTUs == 0) firstTUs = tUs;
-        lastTUs = tUs;
         totalFrames += nSamp;
         totalAudioBytes += payloadLen;
         pkts++;
@@ -232,10 +229,11 @@ finally
 
 var elapsed = (DateTime.UtcNow - start).TotalSeconds;
 Log($"done: {pkts} packets, {totalAudioBytes / 1024.0:0.0} KB audio in {elapsed:0.0}s, drops={drops}");
-if (firstTUs > 0 && lastTUs > firstTUs && pkts > 1)
+if (elapsed > 0 && pkts > 1)
 {
-    double spanS = (lastTUs - firstTUs) / 1e6;
-    double rate  = totalFrames / spanS;
+    // Wall-clock based: includes link jitter, so it's coarser than the
+    // old esp_timer_get_time() measurement but doesn't need a header field.
+    double rate = totalFrames / elapsed;
     Log($"*measured* capture rate: {rate:0.0} Hz (configured {SAMPLE_RATE} Hz, ratio {rate / SAMPLE_RATE:0.0000})");
 }
 return 0;

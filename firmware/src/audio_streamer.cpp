@@ -8,6 +8,7 @@
 #include <freertos/task.h>
 
 #include "config.h"
+#include "motoren.h"
 #include "pdm_capture.h"
 #include "protocol.h"
 
@@ -104,8 +105,6 @@ inline void dcBlockAndGain(int16_t* samples, size_t n_samples) {
 
         memcpy(hdr->magic, proto::MAGIC, 4);
         hdr->seq    = seq++;
-        hdr->t_us   = t_us;
-        hdr->n_samp = got / BYTES_PER_FRAME;
 
         const size_t total = sizeof(proto::PacketHeader) + got;
         IPAddress dst(sub_ip);
@@ -167,15 +166,37 @@ void start() {
 }
 
 void pollAccept() {
-    // Drain any incoming UDP packets. Each one (re)subscribes its source.
+    // Drain any incoming UDP packets. Two kinds:
+    //   - MOT1-prefixed motor command: dispatch to motoren, DO NOT subscribe
+    //     (the controller and the audio listener can be different clients).
+    //   - Anything else (incl. the typical 1-byte ping): treat as audio
+    //     subscribe / keepalive.
     while (true) {
         int n = g_udp.parsePacket();
         if (n <= 0) break;
 
-        // Read & discard the payload.
-        uint8_t scratch[64];
+        // Capture the first chunk so we can sniff for MOT1; drain the rest.
+        uint8_t buf[64];
+        size_t read_total = 0;
+        if (g_udp.available() > 0) {
+            int got = g_udp.read(buf, sizeof(buf));
+            if (got > 0) read_total = (size_t)got;
+        }
         while (g_udp.available() > 0) {
+            uint8_t scratch[64];
             g_udp.read(scratch, sizeof(scratch));
+        }
+
+        if (read_total >= 4 + 1 &&
+            memcmp(buf, proto::MOTOR_MAGIC, 4) == 0) {
+            // MOT1 + per-motor byte (0..100). Extra trailing bytes ignored,
+            // missing trailing bytes leave that motor untouched.
+            size_t n_vals = read_total - 4;
+            if (n_vals > (size_t)MOTOR_COUNT) n_vals = MOTOR_COUNT;
+            for (size_t i = 0; i < n_vals; ++i) {
+                motor_setzen((int)i, (int)buf[4 + i]);
+            }
+            continue;
         }
 
         const IPAddress src = g_udp.remoteIP();
@@ -190,8 +211,7 @@ void pollAccept() {
         g_sub_last_ms = now;
 
         if (new_sub) {
-            Serial.printf("[udp] subscriber: %s:%u\n",
-                          src.toString().c_str(), (unsigned)srcPort);
+            Serial.printf("[udp] subscriber: %s:%u\n", src.toString().c_str(), (unsigned)srcPort);
         }
     }
 }

@@ -11,3 +11,5 @@ firmware/.vscode/launch.json
 firmware/platform
 obj/
 __pycache__
+bin/
+obj/

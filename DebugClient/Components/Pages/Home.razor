@@ -1,6 +1,7 @@
 @page "/"
 @rendermode InteractiveServer
 @inject MicReceiver Mic
+@inject BeltControl Belt
 @inject Microsoft.Extensions.Options.IOptions<BeltOptions> Opts
 @inject ILogger<Home> Log
 @implements IAsyncDisposable
@@ -24,6 +25,15 @@
         background:#6ad06a; transform:translateX(-2px); transition:left .12s ease-out, background .25s; }
     .vb-arrow.unsure .mk { background:#e26a6a; }
     .vb-axis { display:flex; justify-content:space-between; font-size:11px; color:#7a8190; }
+    .vb-motor { display:grid; grid-template-columns:60px 1fr 56px; gap:10px;
+        align-items:center; margin:6px 0; }
+    .vb-motor input[type=range] { width:100%; }
+    .vb-motor .lbl { font-size:13px; color:#d9dde7; }
+    .vb-motor .val { font-size:13px; color:#d9dde7; text-align:right; }
+    .vb-btn { background:#262a36; color:#d9dde7; border:1px solid #353a4a;
+        border-radius:6px; padding:6px 12px; font-family:inherit; cursor:pointer; }
+    .vb-btn:hover { background:#2f3442; }
+    .vb-btn.stop { color:#ffb0b0; border-color:#5c2929; }
 </style>
 
 <div class="vb-wrap">
@@ -56,6 +66,27 @@
             <h2 class="vb" style="color:#ffb45f;">Right channel</h2>
             @Wave(_right, "#ffb45f")
             <div class="vb-muted">peak <strong>@_rPeak</strong> · rms <strong>@_rRms.ToString("F0")</strong></div>
+        </div>
+    </div>
+
+    <div class="vb-panel">
+        <h2 class="vb">Motors</h2>
+        <div class="vb-motor">
+            <span class="lbl">M1 (left)</span>
+            <input type="range" min="0" max="100" step="1"
+                   value="@_m1" @oninput="OnM1Input" />
+            <span class="val">@_m1 %</span>
+        </div>
+        <div class="vb-motor">
+            <span class="lbl">M2 (right)</span>
+            <input type="range" min="0" max="100" step="1"
+                   value="@_m2" @oninput="OnM2Input" />
+            <span class="val">@_m2 %</span>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:6px;">
+            <button class="vb-btn"      @onclick="() => SetBoth(50)">Both 50%</button>
+            <button class="vb-btn"      @onclick="() => SetBoth(100)">Both 100%</button>
+            <button class="vb-btn stop" @onclick="StopMotors">Stop</button>
         </div>
     </div>
 
@@ -132,6 +163,8 @@
     private double _baseline, _sampleRate;
     private int _maxLag;
 
+    private int _m1, _m2;
+
     private bool Live => _haveFix &&
         (DateTime.UtcNow - _lastFixUtc).TotalSeconds < HoldSeconds;
 
@@ -141,7 +174,28 @@
         _baseline = o.BaselineMeters;
         _sampleRate = o.SampleRate;
         _maxLag = Math.Max(1, (int)Math.Ceiling(_baseline / Doa.SpeedOfSound * _sampleRate * 1.1));
+
+        // Reflect whatever was last commanded so the sliders survive a reload.
+        if (Belt.LastSent.Count >= 2)
+        {
+            _m1 = Belt.LastSent[0];
+            _m2 = Belt.LastSent[1];
+        }
     }
+
+    private void OnM1Input(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out var v)) { _m1 = v; PushMotors(); }
+    }
+
+    private void OnM2Input(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out var v)) { _m2 = v; PushMotors(); }
+    }
+
+    private void SetBoth(int pct)    { _m1 = _m2 = pct; PushMotors(); }
+    private void StopMotors()        { _m1 = _m2 = 0;  PushMotors(); }
+    private void PushMotors()        => Belt.Set(_m1, _m2);
 
     // Start the refresh timer only once the component is interactive
     // (OnAfterRender firstRender), never during the static prerender pass.

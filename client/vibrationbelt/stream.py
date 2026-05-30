@@ -22,9 +22,10 @@ CHANNELS     = 2                        # must match firmware cfg::CHANNELS
 SAMPLE_DTYPE = np.int16
 DEFAULT_PORT = 4444
 
-_HEADER_FMT = "<4sIQI"                  # magic, seq, t_us, n_samp
+_HEADER_FMT = "<4sI"                    # magic, seq
 _HEADER_LEN = struct.calcsize(_HEADER_FMT)
 _MAGIC = b"AUD1"
+_MOTOR_MAGIC = b"MOT1"                  # see firmware/src/protocol.h
 
 # Must be < firmware's UDP_SUBSCRIBER_TIMEOUT_MS (5 s).
 _KEEPALIVE_INTERVAL_S = 1.0
@@ -37,8 +38,6 @@ class Chunk:
 
     samples
         np.int16 array; shape (n,) for mono or (n, CHANNELS) for multi-channel.
-    timestamp_us
-        ESP32-side capture time (esp_timer_get_time, monotonic per chip).
     sequence
         Monotonic packet counter from the ESP32.
     dropped_before
@@ -48,7 +47,6 @@ class Chunk:
         for wall-clock alignment across multiple ESP32 nodes.
     """
     samples: np.ndarray
-    timestamp_us: int
     sequence: int
     dropped_before: int
     received_at: float
@@ -170,16 +168,17 @@ class MicStream:
 
     def _parse(self, datagram: bytes, received_at: float) -> Optional[Chunk]:
         if len(datagram) < _HEADER_LEN: return None
-        magic, seq, t_us, n_samp = struct.unpack(
-            _HEADER_FMT, datagram[:_HEADER_LEN])
+        magic, seq = struct.unpack(_HEADER_FMT, datagram[:_HEADER_LEN])
         if magic != _MAGIC: return None
 
         bytes_per_frame = CHANNELS * np.dtype(SAMPLE_DTYPE).itemsize
-        payload_len = n_samp * bytes_per_frame
-        payload = datagram[_HEADER_LEN:_HEADER_LEN + payload_len]
-        if len(payload) < payload_len: return None
+        payload = datagram[_HEADER_LEN:]
+        # Trim any trailing bytes that don't make a whole frame (shouldn't
+        # happen, but be defensive — frombuffer would otherwise raise).
+        usable = (len(payload) // bytes_per_frame) * bytes_per_frame
+        if usable == 0: return None
 
-        samples = np.frombuffer(payload, dtype=SAMPLE_DTYPE).copy()
+        samples = np.frombuffer(payload[:usable], dtype=SAMPLE_DTYPE).copy()
         if CHANNELS > 1:
             samples = samples.reshape(-1, CHANNELS)
 
@@ -193,8 +192,53 @@ class MicStream:
 
         return Chunk(
             samples=samples,
-            timestamp_us=t_us,
             sequence=seq,
             dropped_before=dropped,
             received_at=received_at,
         )
+
+
+class BeltControl:
+    """Sends per-motor strength commands to the ESP32 over UDP.
+
+    The ESP32 listens for ``MOT1`` packets on the same UDP port as the
+    audio stream. A motor command is fire-and-forget: there is no ack
+    and no retry. Re-send when you want to change a strength.
+
+    Usage::
+
+        with BeltControl("10.8.5.177") as belt:
+            belt.set(80, 0)   # motor 1 at 80%, motor 2 off
+            ...
+            belt.stop()
+
+    The controller and the audio listener may be different processes;
+    a motor packet does NOT register the sender for the audio stream.
+    """
+
+    def __init__(self, ip: str, port: int = DEFAULT_PORT):
+        self._server = (ip, port)
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def set(self, *values: int) -> None:
+        """Set one strength byte (0..100) per motor, left to right.
+
+        Pass fewer values than the firmware has motors to leave the
+        unspecified motors untouched; pass more and the extras are
+        silently ignored.
+        """
+        payload = _MOTOR_MAGIC + bytes(
+            max(0, min(100, int(v))) for v in values
+        )
+        self._sock.sendto(payload, self._server)
+
+    def stop(self) -> None:
+        """Shorthand for setting both motors to 0."""
+        self.set(0, 0)
+
+    def close(self) -> None:
+        try: self._sock.close()
+        except OSError: pass
+
+    def __enter__(self) -> "BeltControl": return self
+    def __exit__(self, *exc) -> None:    self.close()

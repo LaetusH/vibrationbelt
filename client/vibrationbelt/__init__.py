@@ -30,14 +30,14 @@ Wire format and the firmware end live in firmware/src/. Keep the
 constants in `stream.py` in sync with firmware/src/config.h.
 """
 
-from .stream  import MicStream, Chunk, SAMPLE_RATE, CHANNELS, DEFAULT_PORT
+from .stream  import MicStream, Chunk, BeltControl, SAMPLE_RATE, CHANNELS, DEFAULT_PORT
 from .array   import MicArray, MicSpec, Event
 from .doa     import gcc_phat, tdoa_to_angle, SPEED_OF_SOUND
 from .tracker import DirectionTracker, DirectionFix
 from .record  import record_wav
 
 __all__ = [
-    "MicStream", "Chunk",
+    "MicStream", "Chunk", "BeltControl",
     "MicArray", "MicSpec", "Event",
     "DirectionTracker", "DirectionFix",
     "gcc_phat", "tdoa_to_angle", "SPEED_OF_SOUND",

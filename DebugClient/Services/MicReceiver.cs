@@ -12,7 +12,7 @@ namespace DebugClient.Services;
 /// </summary>
 public sealed class MicReceiver : BackgroundService
 {
-    private const int    HeaderLen          = 20;
+    private const int    HeaderLen          = 8;
     private const int    MaxDatagram        = 2048;
     private const double KeepaliveIntervalS = 1.0;
     private static readonly byte[] Magic = "AUD1"u8.ToArray();
@@ -135,10 +135,10 @@ public sealed class MicReceiver : BackgroundService
         if (datagram[0] != Magic[0] || datagram[1] != Magic[1] ||
             datagram[2] != Magic[2] || datagram[3] != Magic[3]) return;
 
-        uint seq   = BinaryPrimitives.ReadUInt32LittleEndian(datagram.AsSpan(4));
-        uint nSamp = BinaryPrimitives.ReadUInt32LittleEndian(datagram.AsSpan(16));
-        int payload = (int)nSamp * _opts.Channels * sizeof(short);
-        if (datagram.Length < HeaderLen + payload) return;
+        uint seq = BinaryPrimitives.ReadUInt32LittleEndian(datagram.AsSpan(4));
+        int frameBytes = _opts.Channels * sizeof(short);
+        int payload = ((datagram.Length - HeaderLen) / frameBytes) * frameBytes;
+        if (payload <= 0) return;
 
         if (_haveSeq && seq != _expectedSeq)
         {

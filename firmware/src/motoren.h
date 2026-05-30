@@ -2,14 +2,14 @@
 #include <Arduino.h>
 
 // --- Konfiguration -------------------------------------------
-const int MOTOR_PINS[]   = {32, 33};
+const int MOTOR_PINS[]   = {21, 19};
 const int MOTOR_COUNT    = 2;
 const int PWM_FREQ       = 1000;
 const int PWM_RESOLUTION = 8;
 
 // --- Forward declarations ------------------------------------
-void hilfe_anzeigen();
-void status_anzeigen();
+inline void hilfe_anzeigen();
+inline void status_anzeigen();
 
 // --- Motor-Struktur ------------------------------------------
 struct Motor {
@@ -18,10 +18,13 @@ struct Motor {
   bool aktiv;
 };
 
-Motor motoren[MOTOR_COUNT];
+// `inline` (C++17) lets this header be included from multiple
+// translation units without a multiple-definition link error —
+// audio_streamer.cpp pulls it in to handle MOT1 packets from UDP.
+inline Motor motoren[MOTOR_COUNT];
 
 // --- Setup ---------------------------------------------------
-void motoren_setup() {
+inline void motoren_setup() {
   for (int i = 0; i < MOTOR_COUNT; i++) {
     motoren[i].pin     = MOTOR_PINS[i];
     motoren[i].staerke = 0;
@@ -32,7 +35,7 @@ void motoren_setup() {
 }
 
 // --- Motor einzeln setzen ------------------------------------
-void motor_setzen(int index, int prozent) {
+inline void motor_setzen(int index, int prozent) {
   prozent = constrain(prozent, 0, 100);
   motoren[index].staerke = prozent;
   motoren[index].aktiv   = (prozent > 0);
@@ -41,17 +44,17 @@ void motor_setzen(int index, int prozent) {
   Serial.print(" -> ");   Serial.print(prozent); Serial.println("%");
 }
 
-void alle_setzen(int prozent) {
+inline void alle_setzen(int prozent) {
   for (int i = 0; i < MOTOR_COUNT; i++) motor_setzen(i, prozent);
 }
 
-void alle_stoppen() {
+inline void alle_stoppen() {
   alle_setzen(0);
   Serial.println("Alle Motoren gestoppt.");
 }
 
 // --- Befehl verarbeiten --------------------------------------
-void befehl_verarbeiten(String eingabe) {
+inline void befehl_verarbeiten(String eingabe) {
   eingabe.trim();
   eingabe.toLowerCase();
   if (eingabe == "hilfe" || eingabe == "h")  { hilfe_anzeigen(); return; }
@@ -72,7 +75,7 @@ void befehl_verarbeiten(String eingabe) {
 }
 
 // --- Status --------------------------------------------------
-void status_anzeigen() {
+inline void status_anzeigen() {
   Serial.println("--- Status ---");
   for (int i = 0; i < MOTOR_COUNT; i++) {
     Serial.print("Motor "); Serial.print(i + 1);
@@ -84,7 +87,7 @@ void status_anzeigen() {
 }
 
 // --- Hilfe ---------------------------------------------------
-void hilfe_anzeigen() {
+inline void hilfe_anzeigen() {
   Serial.println("=====================================");
   Serial.println("  Vibrations-Motor Steuerung v1.0");
   Serial.println("=====================================");
