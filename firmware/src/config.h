@@ -53,6 +53,15 @@ inline constexpr bool WIFI_DISABLE_POWERSAVE = true;
 inline constexpr uint16_t STREAM_PORT = 4444;
 inline constexpr uint32_t UDP_SUBSCRIBER_TIMEOUT_MS = 5'000;
 
+// ─── Motor / mic interlock ─────────────────────────────────────────────────
+// The vibration motors share power/ground with the PDM mics; their current
+// pulses corrupt the mic rail and can wedge the I²S peripheral. As a
+// firmware workaround we PAUSE the mics while any motor runs and re-init
+// the PDM channel once they stop. After the last motor stops we wait this
+// long before resuming, so the motor's mechanical spin-down (and its
+// electrical noise) is over before the mics come back.
+inline constexpr uint32_t MOTOR_MIC_COOLDOWN_MS = 150;
+
 // ─── PDM microphone (IM69D130) capture ─────────────────────────────────────
 //
 // Wiring (all on the LEFT side of the 30-pin ESP32-WROOM-32 DevKit):

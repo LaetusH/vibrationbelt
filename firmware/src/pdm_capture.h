@@ -26,6 +26,24 @@ void init();
 /// Block until `bytes` of interleaved L,R int16 samples have been
 /// captured. Returns the number of bytes actually written into `dst`
 /// (normally exactly `bytes` unless the peripheral was torn down).
+/// Returns 0 immediately if the channel is suspended (see suspend()).
 size_t read(void* dst, size_t bytes);
+
+/// Stop the DMA / disable the PDM channel. Used to silence the mics while
+/// the vibration motors run — the motor current pulses corrupt the mic
+/// rail and can wedge the I²S peripheral. The channel stays initialized;
+/// resume() brings it back. No-op if already suspended.
+///
+/// MUST be called from the same task that calls read() — the driver does
+/// not tolerate disabling a channel mid-read from another core.
+void suspend();
+
+/// Re-enable the channel after suspend() and discard the startup transient
+/// (same warm-up drain as init()). No-op if already running.
+/// Same threading rule as suspend().
+void resume();
+
+/// True while the channel is enabled and read() will block for samples.
+bool isRunning();
 
 }  // namespace pdm

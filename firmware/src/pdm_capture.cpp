@@ -10,6 +10,7 @@ namespace pdm {
 namespace {
 
 i2s_chan_handle_t g_rx_chan = nullptr;
+bool              g_running  = false;   // true while DMA is enabled
 
 // IM69D130 PDM clock policy:
 //   - The driver's I2S_PDM_RX_CLK_DEFAULT_CONFIG() selects
@@ -20,6 +21,28 @@ i2s_chan_handle_t g_rx_chan = nullptr;
 //   - We make the choice explicit (and adjustable) rather than relying on
 //     the macro's default, so the comment lives next to the constant.
 constexpr i2s_pdm_dsr_t PDM_DOWNSAMPLE = I2S_PDM_DSR_8S;   // PDM CLK = fs × 128
+
+// Discard the first ~MIC_WARMUP_MS of samples so the receiver doesn't hear
+// the mic's startup transient as a loud "thump". Called after both the
+// initial enable (init) and every re-enable (resume).
+void drainWarmup() {
+    if (cfg::MIC_WARMUP_MS == 0) return;
+    constexpr size_t BYTES_PER_FRAME = cfg::CHANNELS * sizeof(int16_t);
+    const uint32_t warmup_bytes =
+        (cfg::SAMPLE_RATE_HZ * cfg::MIC_WARMUP_MS / 1000) * BYTES_PER_FRAME;
+    uint8_t scratch[512];
+    uint32_t drained = 0;
+    while (drained < warmup_bytes) {
+        size_t want = (warmup_bytes - drained) > sizeof(scratch)
+                      ? sizeof(scratch) : (warmup_bytes - drained);
+        size_t got = 0;
+        if (i2s_channel_read(g_rx_chan, scratch, want, &got,
+                             pdMS_TO_TICKS(200)) != ESP_OK) break;
+        drained += got;
+    }
+    Serial.printf("[pdm] warmup: discarded %lu bytes (~%u ms)\n",
+                  (unsigned long)drained, (unsigned)cfg::MIC_WARMUP_MS);
+}
 
 }  // namespace
 
@@ -61,6 +84,7 @@ void init() {
 
     // ── Step 3: start the DMA ──────────────────────────────────────────
     ESP_ERROR_CHECK(i2s_channel_enable(g_rx_chan));
+    g_running = true;
 
     // Effective PDM clock (for sanity-checking the log against the
     // IM69D130 datasheet's recommended 1–3.5 MHz range).
@@ -76,28 +100,29 @@ void init() {
                   cfg::PDM_CLK_PIN, cfg::PDM_DATA_PIN);
 
     // ── Step 4: warm-up ─────────────────────────────────────────────────
-    // Discard the first ~MIC_WARMUP_MS of samples so the receiver doesn't
-    // hear the mic's startup transient as a loud "thump".
-    if (cfg::MIC_WARMUP_MS > 0) {
-        constexpr size_t BYTES_PER_FRAME = cfg::CHANNELS * sizeof(int16_t);
-        const uint32_t warmup_bytes =
-            (cfg::SAMPLE_RATE_HZ * cfg::MIC_WARMUP_MS / 1000) * BYTES_PER_FRAME;
-        uint8_t scratch[512];
-        uint32_t drained = 0;
-        while (drained < warmup_bytes) {
-            size_t want = (warmup_bytes - drained) > sizeof(scratch)
-                          ? sizeof(scratch) : (warmup_bytes - drained);
-            size_t got = 0;
-            if (i2s_channel_read(g_rx_chan, scratch, want, &got,
-                                 pdMS_TO_TICKS(200)) != ESP_OK) break;
-            drained += got;
-        }
-        Serial.printf("[pdm] warmup: discarded %lu bytes (~%u ms)\n",
-                      (unsigned long)drained, (unsigned)cfg::MIC_WARMUP_MS);
-    }
+    drainWarmup();
 }
 
+void suspend() {
+    if (!g_running) return;
+    // Stop DMA first so no task is mid-read, then disable the channel.
+    ESP_ERROR_CHECK(i2s_channel_disable(g_rx_chan));
+    g_running = false;
+    Serial.println("[pdm] suspended (motors active)");
+}
+
+void resume() {
+    if (g_running) return;
+    ESP_ERROR_CHECK(i2s_channel_enable(g_rx_chan));
+    g_running = true;
+    drainWarmup();          // discard the post-restart transient
+    Serial.println("[pdm] resumed (motors stopped)");
+}
+
+bool isRunning() { return g_running; }
+
 size_t read(void* dst, size_t bytes) {
+    if (!g_running) return 0;        // suspended: nothing to capture
     size_t bytes_read = 0;
     esp_err_t err = i2s_channel_read(g_rx_chan, dst, bytes,
                                      &bytes_read, portMAX_DELAY);

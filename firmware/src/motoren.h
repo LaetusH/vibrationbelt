@@ -53,6 +53,15 @@ inline void alle_stoppen() {
   Serial.println("Alle Motoren gestoppt.");
 }
 
+// True if any motor is currently commanded above 0. Used by the audio task
+// to pause the mics while motors run (they corrupt the mic rail).
+inline bool irgendein_motor_aktiv() {
+  for (int i = 0; i < MOTOR_COUNT; i++) {
+    if (motoren[i].staerke > 0) return true;
+  }
+  return false;
+}
+
 // --- Befehl verarbeiten --------------------------------------
 inline void befehl_verarbeiten(String eingabe) {
   eingabe.trim();

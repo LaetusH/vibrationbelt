@@ -79,8 +79,32 @@ inline void dcBlockAndGain(int16_t* samples, size_t n_samples) {
                   (unsigned)sizeof(proto::PacketHeader),
                   (unsigned)AUDIO_BYTES);
 
+    uint32_t motors_stopped_ms = 0;   // 0 = not in cooldown
+
     for (;;) {
         const uint64_t t_us = esp_timer_get_time();
+
+        // ── Motor / mic interlock ──────────────────────────────────────
+        // The motors corrupt the mic rail, so we stop the PDM peripheral
+        // while any motor runs and re-init it (with a cooldown) once they
+        // stop. All I²S lifecycle calls happen here, on the audio task's
+        // own core, so there's no cross-core teardown race with read().
+        if (irgendein_motor_aktiv()) {
+            if (pdm::isRunning()) pdm::suspend();
+            motors_stopped_ms = 0;
+            vTaskDelay(pdMS_TO_TICKS(20));   // nothing to capture or send
+            continue;
+        }
+        if (!pdm::isRunning()) {
+            // Motors are off — wait out the spin-down, then resume.
+            if (motors_stopped_ms == 0) motors_stopped_ms = millis();
+            if (millis() - motors_stopped_ms < cfg::MOTOR_MIC_COOLDOWN_MS) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+            pdm::resume();
+        }
+
         const size_t got = pdm::read(audio, AUDIO_BYTES);
         if (got == 0) continue;
 
