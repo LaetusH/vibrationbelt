@@ -86,8 +86,30 @@ void tuneForLowLatency() {
 
 }  // namespace
 
-void connect() {
-    WiFi.disconnect(true, true);          // wipe any stale config
+// ── AP mode ────────────────────────────────────────────────────────────────
+
+void connectAP() {
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_AP);
+
+    const bool ok = WiFi.softAP(cfg::WIFI_AP_SSID, cfg::WIFI_AP_PASS,
+                                cfg::WIFI_AP_CHANNEL);
+    if (!ok) {
+        Serial.println("[wifi] softAP() failed — check password length (≥8). Rebooting...");
+        delay(2000);
+        ESP.restart();
+    }
+
+    Serial.printf("[wifi] AP up  SSID='%s'  IP=%s  ch=%u\n",
+                  cfg::WIFI_AP_SSID,
+                  WiFi.softAPIP().toString().c_str(),
+                  cfg::WIFI_AP_CHANNEL);
+}
+
+// ── STA mode ───────────────────────────────────────────────────────────────
+
+void connectSTA() {
+    WiFi.disconnect(true, true);
     WiFi.mode(WIFI_STA);
     WiFi.onEvent(onEvent);
     tuneForLowLatency();
@@ -123,7 +145,19 @@ void connect() {
                   WiFi.channel());
 }
 
+// ── Public API ─────────────────────────────────────────────────────────────
+
+void connect() {
+    if (cfg::WIFI_MODE == cfg::WifiMode::AP)
+        connectAP();
+    else
+        connectSTA();
+}
+
 void tick() {
+    // AP mode has no link to drop — nothing to reconnect.
+    if (cfg::WIFI_MODE == cfg::WifiMode::AP) return;
+
     if (WiFi.status() == WL_CONNECTED) return;
 
     const uint32_t now = millis();

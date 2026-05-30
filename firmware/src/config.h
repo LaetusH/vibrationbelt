@@ -9,13 +9,28 @@
 
 namespace cfg {
 
-// ─── WiFi ──────────────────────────────────────────────────────────────────
+// ─── WiFi mode ─────────────────────────────────────────────────────────────
+// STA  — connect to an existing router (normal client mode).
+// AP   — ESP32 creates its own hotspot; clients connect directly to it.
+//        Default AP address is 192.168.4.1.
+
+enum class WifiMode { STA, AP };
+inline constexpr WifiMode WIFI_MODE = WifiMode::AP;   // ← change this line
+
+// ─── STA mode (connect to existing WiFi) ───────────────────────────────────
 // 2.4 GHz WPA2-PSK only. Captive-portal / WPA2-Enterprise networks won't work.
 
-inline constexpr const char* WIFI_SSID = "Techbase Guest";
-inline constexpr const char* WIFI_PASS = "verbunden25!";
+inline constexpr const char* WIFI_SSID = "iPhone von Georg";
+inline constexpr const char* WIFI_PASS = "753romSchluepft";
 
 inline constexpr uint32_t WIFI_TIMEOUT_MS = 20'000;
+
+// ─── AP mode (ESP32 creates its own hotspot) ───────────────────────────────
+// Password must be ≥8 characters for WPA2, or "" for an open network.
+
+inline constexpr const char* WIFI_AP_SSID    = "VibrationBelt";
+inline constexpr const char* WIFI_AP_PASS    = "vibration";   // ≥8 chars
+inline constexpr uint8_t     WIFI_AP_CHANNEL = 6;
 
 // Disable WiFi power-save (DTM/Beacon listen-interval idle).
 // Power save introduces 100–500 ms latency spikes that are catastrophic
